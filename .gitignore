@@ -1,0 +1,37 @@
+# Build artifacts
+build/
+*.o
+*.obj
+*.exe
+*.out
+*.app
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.cmake
+!CMakeLists.txt
+
+# Virtual disk files
+*.bin
+*.disk
+
+# IDE files
+.vscode/
+.idea/
+*.user
+*.pro.user
+*.autosave
+
+# Qt generated files
+moc_*.cpp
+ui_*.h
+qrc_*.cpp
+*.qm
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
