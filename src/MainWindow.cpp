@@ -731,11 +731,14 @@ void MainWindow::connectSignals() {
         performanceWidget_->setDefragManager(defragMgr_.get());
         performanceWidget_->updateMetrics();
         
-        // Initialize health chart with "Normal" state
-        int freeBlocks = fileSystem_->getDisk()->getFreeBlocks();
-        int totalBlocks = fileSystem_->getDisk()->getTotalBlocks();
-        int usedBlocks = totalBlocks - freeBlocks;
-        performanceWidget_->updateHealthChart(freeBlocks, usedBlocks, 0);
+        // Only initialize health chart to Normal state if there's NO corruption
+        // If system has corruption, don't clear the chart data
+        if (!fileSystem_->hasCorruption()) {
+            int freeBlocks = fileSystem_->getDisk()->getFreeBlocks();
+            int totalBlocks = fileSystem_->getDisk()->getTotalBlocks();
+            int usedBlocks = totalBlocks - freeBlocks;
+            performanceWidget_->updateHealthChart(freeBlocks, usedBlocks, 0);
+        }
         
         updateAllWidgets();
         progressBar_->setValue(100);

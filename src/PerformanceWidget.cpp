@@ -7,6 +7,14 @@
 #include <QLabel>
 #include <QDateTime>
 #include <cstring>
+#include <QBarSet>
+#include <QBarCategoryAxis>
+#include <QValueAxis>
+#include <QLineSeries>
+#include <QDialog>
+#include <QPushButton>
+#include <algorithm>
+#include <iostream>
 
 namespace FileSystemTool {
 
@@ -418,7 +426,7 @@ void PerformanceWidget::updateHealthChart(int freeBlocks, int validBlocks, int o
         // Update column 2 (After Recovery)
         freeSet->replace(2, compressedFreeBlocks);
         validSet->replace(2, validBlocks);
-        corruptedSet->replace(2, 0);  // No orphaned blocks after recovery
+        corruptedSet->replace(2, 0);  // No corrupted blocks after recovery
         
     } else {
         // NORMAL STATE: Initialize the first column
@@ -430,7 +438,7 @@ void PerformanceWidget::updateHealthChart(int freeBlocks, int validBlocks, int o
         // Add column 0 (Normal)
         freeSet->append(compressedFreeBlocks);
         validSet->append(validBlocks);
-        corruptedSet->append(0);  // No orphaned blocks in normal state
+        corruptedSet->append(0);  // No corrupted blocks in normal state
     }
     
     // Update Y-axis range to fit the data (accounting for compressed free blocks)
