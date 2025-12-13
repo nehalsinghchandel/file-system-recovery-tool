@@ -210,8 +210,13 @@ void MainWindow::setupUI() {
     centerLayout->addWidget(blockMapWidget_, 3);
     centerLayout->addWidget(consoleGroup, 1);
     
-    // RIGHT PANEL: Performance Metrics + Recovery Operations
-    QWidget* rightPanel = new QWidget(this);
+    // RIGHT PANEL: Performance Metrics + Recovery Operations (with scroll)
+    QScrollArea* rightScrollArea = new QScrollArea(this);
+    rightScrollArea->setWidgetResizable(true);
+    rightScrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    rightScrollArea->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    
+    QWidget* rightPanel = new QWidget();
     QVBoxLayout* rightLayout = new QVBoxLayout(rightPanel);
     rightLayout->setContentsMargins(0, 0, 0, 0);
     rightLayout->setSpacing(5);
@@ -249,15 +254,28 @@ void MainWindow::setupUI() {
     
     rightLayout->addWidget(performanceWidget_, 3);
     rightLayout->addWidget(recoveryOpsGroup, 1);
-    rightPanel->setMinimumWidth(250);
-    rightPanel->setMaximumWidth(400);
+    rightLayout->addStretch(); // Add stretch to the rightLayout itself
     
-    // Add all panels to main layout
-    mainLayout->addWidget(leftPanel, 1);      // Left: file browser + ops
-    mainLayout->addWidget(centerWidget, 3);   // Center: block map + console
-    mainLayout->addWidget(rightPanel, 1);     // Right: performance + recovery
+    // Set the panel as scroll area's widget
+    rightScrollArea->setWidget(rightPanel);
+    rightPanel->setMinimumWidth(300);
+    rightPanel->setMaximumWidth(400); // Keep original max width
     
-    resize(1400, 900);
+    // Add all panels to horizontal splitter
+    QSplitter* mainSplitter = new QSplitter(Qt::Horizontal, this);
+    mainSplitter->addWidget(leftPanel);
+    mainSplitter->addWidget(centerWidget);
+    mainSplitter->addWidget(rightScrollArea);  // Use scroll area instead of panel
+    
+    // Set initial sizes to ensure right panel is visible
+    mainSplitter->setSizes({300, 600, 300});  // Left: 300px, Center: 600px, Right: 300px
+    mainSplitter->setStretchFactor(0, 2);  // Left panel
+    mainSplitter->setStretchFactor(1, 4);  // Center (block map + console)
+    mainSplitter->setStretchFactor(2, 2);  // Right panel (scrollable)
+    
+    setCentralWidget(mainSplitter);
+    
+    resize(1200, 750);  // Reduced from 1400x900 to fit horizontally
 }
 
 void MainWindow::setupMenuBar() {
@@ -543,16 +561,25 @@ void MainWindow::connectSignals() {
             return;
         }
         
+        // Capture state before crash
+        int freeBlocksBefore = fileSystem_->getDisk()->getFreeBlocks();
+        int totalBlocks = fileSystem_->getDisk()->getTotalBlocks();
+        int usedBlocksBefore = totalBlocks - freeBlocksBefore;
+        
         logOutput_->append("====================================");
-        logOutput_->append("[⚡ POWER CUT] Simulating power failure during write...");
+        logOutput_->append("[⚡ POWER CUT] Simulating power failure!");
         
         // Simulate power cut
         fileSystem_->simulatePowerCut();
         
         // Log corrupted blocks
-        const auto& corruptedBlocks = fileSystem_->getCorruptedBlocks();
-        logOutput_->append(QString("[CORRUPTION] Found %1 orphaned/corrupted blocks:")
-                          .arg(corruptedBlocks.size()));
+        auto corruptedBlocks = fileSystem_->getCorruptedBlocks();
+        int orphanedCount = corruptedBlocks.size();
+        
+        logOutput_->append(QString("[CORRUPTION] Found %1 orphaned blocks from inode %2")
+                          .arg(orphanedCount)
+                          .arg(fileSystem_->getActiveWriteInode()));
+        
         for (uint32_t blockNum : corruptedBlocks) {
             logOutput_->append(QString("  • Block %1 (BLACK on bitmap)").arg(blockNum));
         }
@@ -566,10 +593,14 @@ void MainWindow::connectSignals() {
         // Enable ONLY recovery
         recoveryBtn_->setEnabled(true);
         
+        // Update health chart: After Crash state
+        int freeBlocksAfter = freeBlocksBefore - orphanedCount;
+        performanceWidget_->updateHealthChart(freeBlocksAfter, usedBlocksBefore, orphanedCount);
+        
         // Refresh UI to show corrupted blocks
         blockMapWidget_->refresh();
         fileBrowserWidget_->refresh();
-        
+        performanceWidget_->updateMetrics();
         logOutput_->append("[⚠️ SYSTEM CORRUPTED] File operations DISABLED");
         logOutput_->append("[💡 ACTION REQUIRED] Click 'Run Recovery' to fix corruption");
         logOutput_->append("====================================");
@@ -605,10 +636,17 @@ void MainWindow::connectSignals() {
             crashBtn_->setEnabled(true);
             recoveryBtn_->setEnabled(false);
             
+            // Update health chart: After Recovery state (no more orphaned blocks)
+            int freeBlocks = fileSystem_->getDisk()->getFreeBlocks();
+            int totalBlocks = fileSystem_->getDisk()->getTotalBlocks();
+            int usedBlocks = totalBlocks - freeBlocks;
+            performanceWidget_->updateHealthChart(freeBlocks, usedBlocks, 0);
+            
             // Refresh UI
             blockMapWidget_->refresh();
             fileBrowserWidget_->refresh();
             performanceWidget_->updateMetrics();
+            performanceWidget_->recordOperation();  // Track fragmentation over time
         } else {
             logOutput_->append("[ERROR] Recovery failed");
         }

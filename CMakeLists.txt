@@ -68,11 +68,15 @@ target_link_libraries(file_system_tool
     Qt6::Charts
 )
 
+# Set application properties
+set_target_properties(file_system_tool PROPERTIES
+    MACOSX_BUNDLE TRUE
+    WIN32_EXECUTABLE TRUE
+)
+
 # Platform-specific settings
 if(APPLE)
-    set_target_properties(file_system_tool PROPERTIES
-        MACOSX_BUNDLE TRUE
-    )
+    # MACOSX_BUNDLE is already set globally above
 endif()
 
 # Installation

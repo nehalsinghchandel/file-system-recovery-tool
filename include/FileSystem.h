@@ -64,6 +64,7 @@ public:
     void simulatePowerCut();  // Mark current write as corrupted
     bool hasCorruption() const { return hasCorruption_; }
     const std::vector<uint32_t>& getCorruptedBlocks() const { return corruptedBlocks_; }
+    uint32_t getActiveWriteInode() const { return activeWriteInodeNum_; }
     bool runRecovery();  // Fix corruption, return true if successful
     
     // Access to underlying components (for recovery/optimization)

@@ -11,7 +11,7 @@
 namespace FileSystemTool {
 
 PerformanceWidget::PerformanceWidget(QWidget *parent) 
-    : QWidget(parent), fileSystem_(nullptr), defragMgr_(nullptr) {
+    : QWidget(parent), fileSystem_(nullptr), defragMgr_(nullptr), operationCount_(0) {
     setupUI();
 }
 
@@ -44,26 +44,37 @@ void PerformanceWidget::setupUI() {
     // Latency chart
     setupLatencyChart();
     
-    // Defragmentation Results Section
-    QGroupBox* defragGroup = new QGroupBox("Defragmentation Results", this);
-    QFormLayout* defragLayout = new QFormLayout(defragGroup);
+    // Three visualization charts (setup but don't display inline)
+    setupPerformanceChart();
+    setupHealthChart();
+    setupChaosChart();
     
-    defragResultsLabel_ = new QLabel("No defrag run yet", this);
-    defragResultsLabel_->setStyleSheet("font-weight: bold; color: #95a5a6;");
+    // Buttons to open charts in modals
+    QGroupBox* chartsGroup = new QGroupBox("Visualization Graphs", this);
+    QVBoxLayout* chartsLayout = new QVBoxLayout(chartsGroup);
     
-    beforeLatencyLabel_ = new QLabel("N/A", this);
-    afterLatencyLabel_ = new QLabel("N/A", this);
-    improvementLabel_ = new QLabel("N/A", this);
-    improvementLabel_->setStyleSheet("font-weight: bold;");
+    QPushButton* performanceBtn = new QPushButton("📊 Performance Comparison", this);
+    performanceBtn->setToolTip("Show before/after defragmentation performance chart");
+    performanceBtn->setMinimumHeight(35);
+    connect(performanceBtn, &QPushButton::clicked, this, &PerformanceWidget::showPerformanceChartDialog);
     
-    defragLayout->addRow("Status:", defragResultsLabel_);
-    defragLayout->addRow("Before (avg ms):", beforeLatencyLabel_);
-    defragLayout->addRow("After (avg ms):", afterLatencyLabel_);
-    defragLayout->addRow("Improvement:", improvementLabel_);
+    QPushButton* healthBtn = new QPushButton("🏥 System Health", this);
+    healthBtn->setToolTip("Show disk health across crash/recovery states");
+    healthBtn->setMinimumHeight(35);
+    connect(healthBtn, &QPushButton::clicked, this, &PerformanceWidget::showHealthChartDialog);
+    
+    QPushButton* chaosBtn = new QPushButton("📈 Fragmentation Lifecycle", this);
+    chaosBtn->setToolTip("Show fragmentation over time");
+    chaosBtn->setMinimumHeight(35);
+    connect(chaosBtn, &QPushButton::clicked, this, &PerformanceWidget::showChaosChartDialog);
+    
+    chartsLayout->addWidget(performanceBtn);
+    chartsLayout->addWidget(healthBtn);
+    chartsLayout->addWidget(chaosBtn);
     
     mainLayout->addWidget(metricsGroup);
     mainLayout->addWidget(latencyChartView_);
-    mainLayout->addWidget(defragGroup);
+    mainLayout->addWidget(chartsGroup);
 }
 
 void PerformanceWidget::setupLatencyChart() {
@@ -173,6 +184,7 @@ void PerformanceWidget::updateFragmentationStats() {
                                 .arg(stats.totalFiles));
 }
 
+
 void PerformanceWidget::reset() {
     readLatencies_.clear();
     writeLatencies_.clear();
@@ -182,25 +194,218 @@ void PerformanceWidget::reset() {
     latencyChartView_->update();
 }
 
-void PerformanceWidget::setDefragResults(double beforeMs, double afterMs, uint32_t filesDefragged) {
-    defragResultsLabel_->setText("Last run: Complete");
-    defragResultsLabel_->setStyleSheet("font-weight: bold; color: #27ae60;");
+void PerformanceWidget::setupPerformanceChart() {
+    // Graph 1: Performance Comparison (Grouped Bar Chart)
+    performanceChart_ = new QChart();
+    performanceChart_->setTitle("Performance: Before vs After Defragmentation");
+    performanceChart_->setAnimationOptions(QChart::SeriesAnimations);
     
-    beforeLatencyLabel_->setText(QString("%1 ms").arg(beforeMs, 0, 'f', 4));
-    afterLatencyLabel_->setText(QString("%1 ms").arg(afterMs, 0, 'f', 4));
+    performanceSeries_ = new QBarSeries();
     
-    double improvement = beforeMs - afterMs;
-    QString improvementText = QString("%1 ms (%2 files)")
-                             .arg(improvement, 0, 'f', 4)
-                             .arg(filesDefragged);
+    QBarSet* fragmentedSet = new QBarSet("Fragmented");
+    fragmentedSet->setColor(QColor(231, 76, 60));  // Red
     
-    if (improvement > 0) {
-        improvementLabel_->setText("✓ " + improvementText);
-        improvementLabel_->setStyleSheet("font-weight: bold; color: #27ae60;");
-    } else {
-        improvementLabel_->setText(improvementText);
-        improvementLabel_->setStyleSheet("font-weight: bold; color: #95a5a6;");
+    QBarSet* defraggedSet = new QBarSet("Defragmented");
+    defraggedSet->setColor(QColor(46, 204, 113));  // Green
+    
+    performanceSeries_->append(fragmentedSet);
+    performanceSeries_->append(defraggedSet);
+    
+    performanceChart_->addSeries(performanceSeries_);
+    performanceChart_->createDefaultAxes();
+    performanceChart_->legend()->setVisible(true);
+    performanceChart_->legend()->setAlignment(Qt::AlignBottom);
+    
+    // Create chart view but DON'T add to layout (only for dialog)
+    performanceChartView_ = new QChartView(performanceChart_);
+    performanceChartView_->setRenderHint(QPainter::Antialiasing);
+    performanceChartView_->hide();  // Hidden until shown in dialog
+}
+
+void PerformanceWidget::setupHealthChart() {
+    // Graph 2: Structure Health (Stacked Bar Chart)
+    healthChart_ = new QChart();
+    healthChart_->setTitle("System Health: Normal → Crash → Recovery");
+    healthChart_->setAnimationOptions(QChart::SeriesAnimations);
+    
+    healthSeries_ = new QStackedBarSeries();
+    
+    QBarSet* freeSet = new QBarSet("Free Space");
+    freeSet->setColor(QColor(46, 204, 113));  // Green
+    
+    QBarSet* validSet = new QBarSet("Valid Data");
+    validSet->setColor(QColor(52, 152, 219));  // Blue
+    
+    QBarSet* orphanedSet = new QBarSet("Orphaned Blocks");
+    orphanedSet->setColor(QColor(231, 76, 60));  // Red
+    
+    healthSeries_->append(freeSet);
+    healthSeries_->append(validSet);
+    healthSeries_->append(orphanedSet);
+    
+    healthChart_->addSeries(healthSeries_);
+    
+    QBarCategoryAxis* axisX = new QBarCategoryAxis();
+    axisX->append({"Normal", "After Crash", "After Recovery"});
+    healthChart_->addAxis(axisX, Qt::AlignBottom);
+    healthSeries_->attachAxis(axisX);
+    
+    QValueAxis* axisY = new QValueAxis();
+    axisY->setTitleText("Blocks");
+    healthChart_->addAxis(axisY, Qt::AlignLeft);
+    healthSeries_->attachAxis(axisY);
+    
+    healthChart_->legend()->setVisible(true);
+    healthChart_->legend()->setAlignment(Qt::AlignBottom);
+    
+    // Create chart view but DON'T add to layout (only for dialog)
+    healthChartView_ = new QChartView(healthChart_);
+    healthChartView_->setRenderHint(QPainter::Antialiasing);
+    healthChartView_->hide();  // Hidden until shown in dialog
+}
+
+void PerformanceWidget::setupChaosChart() {
+    // Graph 3: Fragmentation Over Time (Line Graph)
+    chaosChart_ = new QChart();
+    chaosChart_->setTitle("Fragmentation Lifecycle");
+    chaosChart_->setAnimationOptions(QChart::SeriesAnimations);
+    
+    chaosLine_ = new QLineSeries();
+    chaosLine_->setName("Fragmentation %");
+    chaosLine_->setColor(QColor(231, 76, 60));  // Red
+    
+    // Start at 0%
+    chaosLine_->append(0, 0);
+    
+    chaosChart_->addSeries(chaosLine_);
+    
+    QValueAxis* axisX = new QValueAxis();
+    axisX->setTitleText("Operations");
+    axisX->setLabelFormat("%d");
+    axisX->setRange(0, 100);
+    
+    QValueAxis* axisY = new QValueAxis();
+    axisY->setTitleText("Fragmentation (%)");
+    axisY->setRange(0, 100);
+    
+    chaosChart_->addAxis(axisX, Qt::AlignBottom);
+    chaosChart_->addAxis(axisY, Qt::AlignLeft);
+    chaosLine_->attachAxis(axisX);
+    chaosLine_->attachAxis(axisY);
+    
+    chaosChart_->legend()->setVisible(true);
+    chaosChart_->legend()->setAlignment(Qt::AlignBottom);
+    
+    // Create chart view but DON'T add to layout (only for dialog)
+    chaosChartView_ = new QChartView(chaosChart_);
+    chaosChartView_->setRenderHint(QPainter::Antialiasing);
+    chaosChartView_->hide();  // Hidden until shown in dialog
+}
+
+// Graph update methods
+void PerformanceWidget::updatePerformanceChart(const std::vector<FilePerformance>& data) {
+    // Clear existing data
+    while (performanceSeries_->count() > 0) {
+        performanceSeries_->remove(performanceSeries_->barSets().at(0));
     }
+    
+    QBarSet* fragmentedSet = new QBarSet("Fragmented");
+    fragmentedSet->setColor(QColor(231, 76, 60));
+    
+    QBarSet* defraggedSet = new QBarSet("Defragmented");
+    defraggedSet->setColor(QColor(46, 204, 113));
+    
+    for (const auto& perf : data) {
+        fragmentedSet->append(perf.fragmentedTime);
+        defraggedSet->append(perf.defraggedTime);
+    }
+    
+    performanceSeries_->append(fragmentedSet);
+    performanceSeries_->append(defraggedSet);
+}
+
+void PerformanceWidget::updateHealthChart(int freeBlocks, int validBlocks, int orphanedBlocks) {
+    // Update stacked bar series with new data
+    if (healthSeries_->count() >= 3) {
+        healthSeries_->barSets().at(0)->append(freeBlocks);     // Free
+        healthSeries_->barSets().at(1)->append(validBlocks);    // Valid
+        healthSeries_->barSets().at(2)->append(orphanedBlocks); // Orphaned
+    }
+}
+
+void PerformanceWidget::updateChaosChart() {
+    if (!fileSystem_) return;
+    
+    double fragmentation = fileSystem_->getFragmentationScore();
+    chaosLine_->append(operationCount_, fragmentation);
+    
+    // Update X axis range if needed
+    if (operationCount_ > 100) {
+        auto* axisX = qobject_cast<QValueAxis*>(chaosChart_->axes(Qt::Horizontal).at(0));
+        if (axisX) {
+            axisX->setRange(0, operationCount_ + 10);
+        }
+    }
+}
+
+void PerformanceWidget::recordOperation() {
+    operationCount_++;
+    updateChaosChart();
+}
+
+// Dialog methods to show charts in modal windows
+void PerformanceWidget::showPerformanceChartDialog() {
+    QDialog* dialog = new QDialog(this);
+    dialog->setWindowTitle("Performance: Before vs After Defragmentation");
+    dialog->resize(800, 600);
+    
+    QVBoxLayout* layout = new QVBoxLayout(dialog);
+    QChartView* chartView = new QChartView(performanceChart_, dialog);
+    chartView->setRenderHint(QPainter::Antialiasing);
+    
+    layout->addWidget(chartView);
+    
+    QPushButton* closeBtn = new QPushButton("Close", dialog);
+    connect(closeBtn, &QPushButton::clicked, dialog, &QDialog::accept);
+    layout->addWidget(closeBtn);
+    
+    dialog->exec();
+}
+
+void PerformanceWidget::showHealthChartDialog() {
+    QDialog* dialog = new QDialog(this);
+    dialog->setWindowTitle("System Health: Normal → Crash → Recovery");
+    dialog->resize(800, 600);
+    
+    QVBoxLayout* layout = new QVBoxLayout(dialog);
+    QChartView* chartView = new QChartView(healthChart_, dialog);
+    chartView->setRenderHint(QPainter::Antialiasing);
+    
+    layout->addWidget(chartView);
+    
+    QPushButton* closeBtn = new QPushButton("Close", dialog);
+    connect(closeBtn, &QPushButton::clicked, dialog, &QDialog::accept);
+    layout->addWidget(closeBtn);
+    
+    dialog->exec();
+}
+
+void PerformanceWidget::showChaosChartDialog() {
+    QDialog* dialog = new QDialog(this);
+    dialog->setWindowTitle("Fragmentation Lifecycle");
+    dialog->resize(800, 600);
+    
+    QVBoxLayout* layout = new QVBoxLayout(dialog);
+    QChartView* chartView = new QChartView(chaosChart_, dialog);
+    chartView->setRenderHint(QPainter::Antialiasing);
+    
+    layout->addWidget(chartView);
+    
+    QPushButton* closeBtn = new QPushButton("Close", dialog);
+    connect(closeBtn, &QPushButton::clicked, dialog, &QDialog::accept);
+    layout->addWidget(closeBtn);
+    
+    dialog->exec();
 }
 
 } // namespace FileSystemTool

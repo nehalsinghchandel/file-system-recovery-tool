@@ -14,6 +14,7 @@
 #include <QProgressBar>
 #include <QSlider>
 #include <QFrame>
+#include <QScrollArea>
 #include <memory>
 #include "FileSystem.h"
 #include "RecoveryManager.h"
