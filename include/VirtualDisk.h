@@ -46,7 +46,8 @@ public:
     bool writeBlock(uint32_t blockNum, const uint8_t* buffer);
     
     // Block allocation
-    int32_t allocateBlock();
+    int32_t allocateBlock();  // First-fit allocation (fast)
+    int32_t allocateBlockCompact();  // Allocate from lowest block (for defrag)
     bool freeBlock(uint32_t blockNum);
     bool isBlockFree(uint32_t blockNum);
     

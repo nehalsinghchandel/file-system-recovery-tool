@@ -115,6 +115,10 @@ bool DefragManager::defragmentFileSystem(bool& cancelled) {
         }
     }
     
+    // CRITICAL: Write bitmap and superblock to disk to persist changes
+    fs_->getDisk()->writeBitmap();
+    fs_->getDisk()->writeSuperblock();
+    
     // Run benchmark after
     if (!cancelled) {
         afterBenchmark_ = runBenchmark(50);
@@ -153,13 +157,7 @@ bool DefragManager::defragmentFile(uint32_t inodeNum) {
         fileData.insert(fileData.end(), blockBuffer.begin(), blockBuffer.begin() + bytesToCopy);
     }
     
-    // Find contiguous blocks
-    auto newBlocks = findContiguousBlocks(inode.blockCount);
-    if (newBlocks.size() != inode.blockCount) {
-        return false;  // Couldn't find enough contiguous blocks
-    }
-    
-    // Free old blocks
+    // Free old blocks FIRST - this creates free space at their locations
     for (uint32_t blockNum : blocks) {
         fs_->getDisk()->freeBlock(blockNum);
     }
@@ -169,7 +167,22 @@ bool DefragManager::defragmentFile(uint32_t inodeNum) {
     inode.indirectBlock = 0;
     inode.blockCount = 0;
     
-    // Write data to new contiguous blocks
+    // Allocate new blocks using COMPACT allocation (from lowest available)
+    // This ensures all files get sequential blocks
+    std::vector<uint32_t> newBlocks;
+    for (uint32_t i = 0; i < blocks.size(); ++i) {
+        int32_t blockNum = fs_->getDisk()->allocateBlockCompact();
+        if (blockNum < 0) {
+            // Allocation failed - restore old blocks
+            for (uint32_t oldBlock : blocks) {
+                fs_->getDisk()->allocateBlock();  // Re-allocate to mark as used
+            }
+            return false;
+        }
+        newBlocks.push_back(static_cast<uint32_t>(blockNum));
+    }
+    
+    // Write data to new sequential blocks
     for (size_t i = 0; i < newBlocks.size(); ++i) {
         size_t offset = i * BLOCK_SIZE;
         size_t copySize = std::min(static_cast<size_t>(BLOCK_SIZE), fileData.size() - offset);

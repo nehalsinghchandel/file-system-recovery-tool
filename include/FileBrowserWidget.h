@@ -33,6 +33,8 @@ public:
     void setFileSystem(FileSystem* fs);
     void refresh();
     void navigateToPath(const QString& path);
+    QStringList getSelectedFiles() const;  // Get list of selected file paths
+    void triggerDelete();  // Public method to trigger delete operation
 
 signals:
     void fileSelected(const QString& path);
@@ -51,7 +53,7 @@ private:
     void setupUI();
     void loadDirectory(const QString& path);
     void populateTable(const std::vector<DirectoryEntry>& entries);
-    void updateFileDetails(const FileInfo& info);
+    uint32_t calculateFragments(const DirectoryEntry& entry);
     
     FileSystem* fileSystem_;
     QString currentPath_;
@@ -59,9 +61,7 @@ private:
     // UI components
     QTreeWidget* directoryTree_;
     QTableWidget* fileTable_;
-    QLabel* detailsLabel_;
     QPushButton* refreshBtn_;
-    QPushButton* deleteBtn_;
     
     // Columns in file table
     enum FileTableColumn {

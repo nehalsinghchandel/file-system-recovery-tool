@@ -6,6 +6,7 @@
 #include <QPushButton>
 #include <QLabel>
 #include <QFrame>
+#include <QSet>
 
 namespace FileSystemTool {
 
@@ -22,7 +23,6 @@ void FileBrowserWidget::setFileSystem(FileSystem* fs) {
 void FileBrowserWidget::refresh() {
     if (!fileSystem_ || !fileSystem_->isMounted()) {
         fileTable_->setRowCount(0);
-        detailsLabel_->setText("No disk mounted");
         return;
     }
     
@@ -30,22 +30,48 @@ void FileBrowserWidget::refresh() {
 }
 
 void FileBrowserWidget::navigateToPath(const QString& path) {
-    currentPath_ = path;
-    refresh();
+    loadDirectory(path);
+}
+
+QStringList FileBrowserWidget::getSelectedFiles() const {
+    QStringList files;
+    auto selectedItems = fileTable_->selectedItems();
+    QSet<int> uniqueRows;
+    
+    for (auto* item : selectedItems) {
+        uniqueRows.insert(item->row());
+    }
+    
+    for (int row : uniqueRows) {
+        auto* nameItem = fileTable_->item(row, COL_NAME);
+        if (nameItem) {
+            QString name = nameItem->text();
+            // Prepend currentPath_ to get full path
+            QString fullPath = currentPath_;
+            if (!fullPath.endsWith('/')) {
+                fullPath += '/';
+            }
+            fullPath += name;
+            files.append(fullPath);
+        }
+    }
+    
+    return files;
+}
+
+void FileBrowserWidget::triggerDelete() {
+    onDeleteClicked();
 }
 
 void FileBrowserWidget::setupUI() {
     QVBoxLayout* mainLayout = new QVBoxLayout(this);
     
-    // Top bar
+    // Top bar - just path and refresh
     QHBoxLayout* topLayout = new QHBoxLayout();
     QLabel* pathLabel = new QLabel(QString("Path: /"), this);
     refreshBtn_ = new QPushButton("Refresh", this);
-    deleteBtn_ = new QPushButton("Delete Selected", this);
-    deleteBtn_->setStyleSheet("background-color: #e74c3c; color: white;");
     topLayout->addWidget(pathLabel);
     topLayout->addStretch();
-    topLayout->addWidget(deleteBtn_);
     topLayout->addWidget(refreshBtn_);
     
     // File table
@@ -54,20 +80,14 @@ void FileBrowserWidget::setupUI() {
     fileTable_->setHorizontalHeaderLabels({"Name", "Type", "Size", "Fragments", "Inode"});
     fileTable_->horizontalHeader()->setStretchLastSection(true);
     fileTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
+    fileTable_->setSelectionMode(QAbstractItemView::ExtendedSelection);  // Enable multi-select
     fileTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    
-    // Details label
-    detailsLabel_ = new QLabel(QString("No file selected"), this);
-    detailsLabel_->setFrameStyle(QFrame::Panel | QFrame::Sunken);
-    detailsLabel_->setMinimumHeight(60);
     
     mainLayout->addLayout(topLayout);
     mainLayout->addWidget(fileTable_);
-    mainLayout->addWidget(detailsLabel_);
     
     // Connect signals
     connect(refreshBtn_, &QPushButton::clicked, this, &FileBrowserWidget::onRefreshClicked);
-    connect(deleteBtn_, &QPushButton::clicked, this, &FileBrowserWidget::onDeleteClicked);
     connect(fileTable_, SIGNAL(itemDoubleClicked(QTableWidgetItem*)), 
             this, SLOT(onTableItemDoubleClicked(QTableWidgetItem*)));
     
@@ -78,13 +98,41 @@ void FileBrowserWidget::setupUI() {
 }
 
 void FileBrowserWidget::loadDirectory(const QString& path) {
-    if (!fileSystem_) return;
+    currentPath_ = path;
     
+    if (!fileSystem_ || !fileSystem_->isMounted()) {
+        fileTable_->setRowCount(0);
+        return;
+    }
+    
+    // List directory contents
     auto entries = fileSystem_->listDir(path.toStdString());
     populateTable(entries);
 }
 
+uint32_t FileBrowserWidget::calculateFragments(const DirectoryEntry& entry) {
+    if (!fileSystem_ || entry.fileType != static_cast<uint8_t>(FileType::REGULAR_FILE)) {
+        return 0; // Only calculate for regular files
+    }
+
+    Inode inode;
+    if (fileSystem_->getInodeManager()->readInode(entry.inodeNumber, inode)) {
+        auto blocks = fileSystem_->getInodeManager()->getInodeBlocks(inode);
+        if (blocks.empty()) return 0;
+
+        uint32_t fragments = 1;
+        for (size_t j = 1; j < blocks.size(); ++j) {
+            if (blocks[j] != blocks[j-1] + 1) {
+                fragments++;
+            }
+        }
+        return fragments;
+    }
+    return 0;
+}
+
 void FileBrowserWidget::populateTable(const std::vector<DirectoryEntry>& entries) {
+    fileTable_->setRowCount(0); // Clear existing rows
     fileTable_->setRowCount(entries.size());
     
     for (size_t i = 0; i < entries.size(); ++i) {
@@ -130,16 +178,6 @@ void FileBrowserWidget::populateTable(const std::vector<DirectoryEntry>& entries
             QString::number(entry.inodeNumber));
         fileTable_->setItem(i, COL_INODE, inodeItem);
     }
-}
-
-void FileBrowserWidget::updateFileDetails(const FileInfo& info) {
-    QString details = QString("Name: %1 | Type: %2 | Size: %3 bytes | Fragments: %4 | Inode: %5")
-                     .arg(info.name)
-                     .arg(info.type)
-                     .arg(info.size)
-                     .arg(info.fragmentCount)
-                     .arg(info.inodeNum);
-    detailsLabel_->setText(details);
 }
 
 void FileBrowserWidget::onTreeItemClicked(QTreeWidgetItem* item, int column) {
@@ -189,45 +227,71 @@ void FileBrowserWidget::onRefreshClicked() {
 void FileBrowserWidget::onDeleteClicked() {
     auto selectedItems = fileTable_->selectedItems();
     if (selectedItems.isEmpty()) {
-        QMessageBox::information(this, "No Selection", "Please select a file to delete");
+        QMessageBox::information(this, "No Selection", "Please select file(s) to delete");
         return;
     }
     
-    int row = fileTable_->currentRow();
-    if (row < 0) return;
+    // Get unique rows (selected items includes all columns)
+    QSet<int> selectedRows;
+    for (auto* item : selectedItems) {
+        selectedRows.insert(item->row());
+    }
     
-    QString name = fileTable_->item(row, COL_NAME)->text();
-    QString type = fileTable_->item(row, COL_TYPE)->text();
+    // Build list of files to delete (skip . and ..)
+    QStringList filesToDelete;
+    for (int row : selectedRows) {
+        QString name = fileTable_->item(row, COL_NAME)->text();
+        if (name != "." && name != "..") {
+            filesToDelete.append(name);
+        }
+    }
     
-    // Don't allow deleting "." or ".."
-    if (name == "." || name == "..") {
+    if (filesToDelete.isEmpty()) {
         QMessageBox::warning(this, "Cannot Delete", "Cannot delete current or parent directory entries");
         return;
     }
     
     // Confirm deletion
-    auto reply = QMessageBox::question(this, "Confirm Delete",
-        QString("Are you sure you want to delete '%1'?").arg(name),
+    QString message = (filesToDelete.size() == 1) 
+        ? QString("Are you sure you want to delete '%1'?").arg(filesToDelete[0])
+        : QString("Are you sure you want to delete %1 files?").arg(filesToDelete.size());
+    
+    auto reply = QMessageBox::question(this, "Confirm Delete", message,
         QMessageBox::Yes | QMessageBox::No);
     
     if (reply != QMessageBox::Yes) {
         return;
     }
     
-    // Build full path
-    QString fullPath = currentPath_;
-    if (!fullPath.endsWith('/')) {
-        fullPath += '/';
-    }
-    fullPath += name;
+    // Delete files
+    int successCount = 0;
+    int failCount = 0;
     
-    // Delete the file
-    if (fileSystem_ && fileSystem_->deleteFile(fullPath.toStdString())) {
-        refresh();
-        emit fileDeleted(fullPath);
-    } else {
+    for (const QString& name : filesToDelete) {
+        QString fullPath = currentPath_;
+        if (!fullPath.endsWith('/')) {
+            fullPath += '/';
+        }
+        fullPath += name;
+        
+        if (fileSystem_ && fileSystem_->deleteFile(fullPath.toStdString())) {
+            successCount++;
+            emit fileDeleted(fullPath);
+        } else {
+            failCount++;
+        }
+    }
+    
+    // Show results if multiple files
+    if (filesToDelete.size() > 1) {
+        QString result = QString("Deleted: %1 files\nFailed: %2 files")
+            .arg(successCount).arg(failCount);
+        QMessageBox::information(this, "Delete Complete", result);
+    } else if (failCount > 0) {
         QMessageBox::critical(this, "Error", "Failed to delete file");
     }
+    
+    refresh();
 }
 
 void FileBrowserWidget::onContextMenu(const QPoint& pos) {

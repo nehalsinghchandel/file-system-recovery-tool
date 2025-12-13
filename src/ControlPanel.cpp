@@ -7,6 +7,7 @@
 #include <QLabel>
 #include <QMessageBox>
 #include <QDateTime>
+#include <QApplication>
 #include <random>
 
 namespace FileSystemTool {
@@ -36,12 +37,45 @@ void ControlPanel::setDiskMounted(bool mounted) {
 }
 
 void ControlPanel::appendLog(const QString& message) {
-    QString timestamp = QDateTime::currentDateTime().toString("hh:mm:ss");
-    logOutput_->append(QString("[%1] %2").arg(timestamp).arg(message));
+    QString timestamp = QTime::currentTime().toString("hh:mm:ss");
+    emit logMessage(QString("[%1] %2").arg(timestamp).arg(message));
 }
 
 void ControlPanel::clearLog() {
-    logOutput_->clear();
+    // Signal could be added if needed for clearing log
+}
+
+// Public methods for triggering operations from MainWindow
+void ControlPanel::createFile(const QString& filename) {
+    if (!fileSystem_) {
+        appendLog("Error: No file system");
+        return;
+    }
+    
+    if (fileSystem_->createFile(filename.toStdString())) {
+        appendLog("Created file: " + filename);
+        emit operationCompleted();
+    } else {
+        appendLog("Error: Failed to create file: " + filename);
+    }
+}
+
+void ControlPanel::writeRandomFiles(int numFiles) {
+    filenameInput_->setText("");  // Clear input
+    numFilesCombo_->setCurrentText(QString::number(numFiles));
+    onWriteRandomDataClicked();
+}
+
+void ControlPanel::simulateCrash() {
+    onSimulateCrashClicked();
+}
+
+void ControlPanel::runRecovery() {
+    onRunRecoveryClicked();
+}
+
+void ControlPanel::runDefrag() {
+    onRunDefragClicked();
 }
 
 void ControlPanel::setupUI() {
@@ -98,21 +132,22 @@ void ControlPanel::setupUI() {
     progressBar_ = new QProgressBar(this);
     progressBar_->setVisible(false);
     
-    // Log output
-    QGroupBox* logGroup = new QGroupBox("Log Output", this);
-    QVBoxLayout* logLayout = new QVBoxLayout(logGroup);
+    // Log output (This section is now commented out as logging is handled via signals)
+    // QGroupBox* logGroup = new QGroupBox("Log Output", this);
+    // QVBoxLayout* logLayout = new QVBoxLayout(logGroup);
     
-    logOutput_ = new QTextEdit(this);
-    logOutput_->setReadOnly(true);
-    logOutput_->setMaximumHeight(150);
+    // logOutput_ = new QTextEdit(this);
+    // logOutput_->setReadOnly(true);
+    // logOutput_->setMaximumHeight(150);
     
-    logLayout->addWidget(logOutput_);
+    // logLayout->addWidget(logOutput_);
     
     // Add all to main layout
     mainLayout->addWidget(fileOpsGroup_);
     mainLayout->addWidget(recoveryOpsGroup_);
     mainLayout->addWidget(progressBar_);
-    mainLayout->addWidget(logGroup);
+    // mainLayout->addWidget(logGroup); // Removed as log output is now external
+    mainLayout->addStretch(); // Added to push content upwards
     
     // Connect signals
     connect(createFileBtn_, &QPushButton::clicked, this, &ControlPanel::onCreateFileClicked);
@@ -169,6 +204,27 @@ void ControlPanel::onDeleteFileClicked() {
 void ControlPanel::onWriteRandomDataClicked() {
     int numFiles = numFilesCombo_->currentText().toInt();
     
+    // Check available resources before starting
+    if (!fileSystem_ || !fileSystem_->isMounted()) {
+        appendLog("Error: File system not mounted");
+        return;
+    }
+    
+    uint32_t freeBlocks = fileSystem_->getFreeBlocks();
+    uint32_t estimatedBlocksNeeded = numFiles * 3; // Rough estimate: 2-3 blocks per file
+    
+    if (freeBlocks < estimatedBlocksNeeded) {
+        auto reply = QMessageBox::warning(this, "Low Disk Space",
+            QString("Not enough free blocks. Available: %1, Estimated needed: %2\n"
+                    "Continue anyway?")
+                .arg(freeBlocks).arg(estimatedBlocksNeeded),
+            QMessageBox::Yes | QMessageBox::No);
+        
+        if (reply != QMessageBox::Yes) {
+            return;
+        }
+    }
+    
     appendLog(QString("Writing %1 random files...").arg(numFiles));
     progressBar_->setVisible(true);
     progressBar_->setRange(0, numFiles);
@@ -180,12 +236,27 @@ void ControlPanel::onWriteRandomDataClicked() {
     // Use timestamp to ensure unique filenames across multiple clicks
     qint64 timestamp = QDateTime::currentMSecsSinceEpoch();
     
+    int successCount = 0;
+    int failCount = 0;
+    
     for (int i = 0; i < numFiles; ++i) {
+        // Check if we still have space (check every 10 files)
+        if (i % 10 == 0 && fileSystem_->getFreeBlocks() < 10) {
+            appendLog(QString("Disk full after %1 files. Stopping.").arg(i));
+            break;
+        }
+        
         // Create unique filename with timestamp
         QString filename = QString("/random_%1_%2.dat").arg(timestamp).arg(i);
         
         if (!fileSystem_->createFile(filename.toStdString())) {
             appendLog(QString("Failed to create: %1").arg(filename));
+            failCount++;
+            // Stop if we get too many consecutive failures
+            if (failCount > 5) {
+                appendLog("Too many failures. Stopping.");
+                break;
+            }
             continue;
         }
         
@@ -196,18 +267,45 @@ void ControlPanel::onWriteRandomDataClicked() {
             byte = static_cast<uint8_t>(gen());
         }
         
-        fileSystem_->writeFile(filename.toStdString(), data);
+        // Write data with error checking
+        if (!fileSystem_->writeFile(filename.toStdString(), data)) {
+            appendLog(QString("Failed to write: %1").arg(filename));
+            failCount++;
+            // Clean up the empty file
+            fileSystem_->deleteFile(filename.toStdString());
+            
+            if (failCount > 5) {
+                appendLog("Too many write failures. Stopping.");
+                break;
+            }
+            continue;
+        }
+        
+        successCount++;
+        failCount = 0; // Reset consecutive fail counter
         progressBar_->setValue(i + 1);
+        
+        // Process events periodically to keep UI responsive
+        if (i % 10 == 0) {
+            QApplication::processEvents();
+        }
     }
     
     progressBar_->setVisible(false);
-    appendLog(QString("Completed writing %1 files").arg(numFiles));
+    appendLog(QString("Completed: %1 files written, %2 failed")
+        .arg(successCount).arg(failCount));
     emit operationCompleted();
 }
 
 void ControlPanel::onSimulateCrashClicked() {
     auto reply = QMessageBox::warning(this, "Simulate Crash",
-        "This will simulate a system crash by leaving data in an inconsistent state.\n"
+        "This will simulate a system crash by:\n\n"
+        "• Creating a partially written file with orphan blocks\n"
+        "• Marking disk as 'not cleanly unmounted'\n"
+        "• Leaving inconsistent metadata\n\n"
+        "The file system will remain usable, but:\n"
+        "• Recovery will be needed to clean up orphan blocks\n"
+        "• You'll see a warning when remounting the disk\n\n"
         "Continue?",
         QMessageBox::Yes | QMessageBox::No);
     
@@ -223,7 +321,10 @@ void ControlPanel::onSimulateCrashClicked() {
     
     if (recoveryMgr_) {
         recoveryMgr_->simulateCrashDuringWrite(filename, data, 0.5);
-        appendLog("CRASH SIMULATED! File system in inconsistent state");
+        appendLog("⚠️ CRASH SIMULATED!");
+        appendLog("Disk marked as 'not cleanly unmounted'");
+        appendLog("Partial file created with orphan blocks");
+        appendLog("Close and reopen disk, then run recovery to fix");
         fileSystem_->getDisk()->markDirty();
     }
     

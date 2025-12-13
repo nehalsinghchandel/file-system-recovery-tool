@@ -53,6 +53,13 @@ public:
     uint32_t getUsedBlocks() const;
     double getFragmentationScore();
     
+    // Block ownership tracking for per-file visualization
+    void setBlockOwner(uint32_t blockNum, uint32_t inodeNum);
+    void clearBlockOwner(uint32_t blockNum);
+    uint32_t getBlockOwner(uint32_t blockNum) const;  // Returns inode num, or UINT32_MAX if unowned
+    std::string getFilenameFromInode(uint32_t inodeNum) const;
+    void rebuildBlockOwnership();  // Rebuild ownership map from disk state
+    
     // Access to underlying components (for recovery/optimization)
     VirtualDisk* getDisk() { return disk_.get(); }
     InodeManager* getInodeManager() { return inodeMgr_.get(); }
@@ -78,9 +85,10 @@ private:
     std::unique_ptr<DirectoryManager> dirMgr_;
     bool mounted_;
     PerformanceStats stats_;
+    std::map<uint32_t, uint32_t> blockOwners_;  // blockNum -> inodeNum mapping
     
     // Helper functions
-    bool allocateFileBlocks(Inode& inode, const std::vector<uint8_t>& data);
+    bool allocateFileBlocks(uint32_t inodeNum, Inode& inode, const std::vector<uint8_t>& data);
     bool readFileData(const Inode& inode, std::vector<uint8_t>& data);
     void updateStats(bool isRead, double timeMs, uint64_t bytes);
 };

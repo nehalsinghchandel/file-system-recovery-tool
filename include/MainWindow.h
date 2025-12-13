@@ -6,6 +6,14 @@
 #include <QStatusBar>
 #include <QMenuBar>
 #include <QLabel>
+#include <QTextEdit>
+#include <QGroupBox>
+#include <QLineEdit>
+#include <QComboBox>
+#include <QPushButton>
+#include <QProgressBar>
+#include <QSlider>
+#include <QFrame>
 #include <memory>
 #include "FileSystem.h"
 #include "RecoveryManager.h"
@@ -56,10 +64,22 @@ private:
     PerformanceWidget* performanceWidget_;
     ControlPanel* controlPanel_;
     FileBrowserWidget* fileBrowserWidget_;
+    QTextEdit* logOutput_;
     
-    // Layout
-    QSplitter* mainSplitter_;
-    QSplitter* rightSplitter_;
+    // Inline operation widgets
+    QLineEdit* filenameInput_;
+    QPushButton* createFileBtn_;
+    QPushButton* deleteFileBtn_;
+    QPushButton* readFileBtn_;
+    QSlider* fileSizeSlider_;
+    QLabel* fileSizeLabel_;
+    QComboBox* numFilesCombo_;
+    QPushButton* writeRandomBtn_;
+    QProgressBar* writeProgressBar_;  // For animated file writes
+    QPushButton* crashBtn_;
+    QPushButton* recoveryBtn_;
+    QPushButton* defragBtn_;
+    QProgressBar* progressBar_;
     
     // Status
     QLabel* statusLabel_;

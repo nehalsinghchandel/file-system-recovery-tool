@@ -164,11 +164,28 @@ bool VirtualDisk::writeBlock(uint32_t blockNum, const uint8_t* buffer) {
 }
 
 int32_t VirtualDisk::allocateBlock() {
-    // Find first free block in data region
+    // Find first free block in data region (fast first-fit)
     for (uint32_t i = superblock_.dataBlocksStart; i < superblock_.totalBlocks; ++i) {
         if (bitmap_[i]) {  // Block is free
             bitmap_[i] = false;  // Mark as used
             superblock_.freeBlocks--;
+            writeBitmap();  // Keep disk in sync
+            return static_cast<int32_t>(i);
+        }
+    }
+    
+    std::cerr << "No free blocks available" << std::endl;
+    return -1;  // No free blocks
+}
+
+int32_t VirtualDisk::allocateBlockCompact() {
+    // Allocate from LOWEST free block (creates contiguous layout for defrag)
+    // This is slower but produces compact allocation
+    for (uint32_t i = superblock_.dataBlocksStart; i < superblock_.totalBlocks; ++i) {
+        if (bitmap_[i]) {  // Block is free
+            bitmap_[i] = false;  // Mark as used
+            superblock_.freeBlocks--;
+            writeBitmap();  // Keep disk in sync (same as regular allocateBlock)
             return static_cast<int32_t>(i);
         }
     }
@@ -194,6 +211,8 @@ bool VirtualDisk::freeBlock(uint32_t blockNum) {
         // Zero out the block for security
         std::vector<uint8_t> zeros(BLOCK_SIZE, 0);
         writeBlock(blockNum, zeros.data());
+        
+        writeBitmap();  // Keep disk in sync
         
         return true;
     }

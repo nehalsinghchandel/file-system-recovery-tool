@@ -45,6 +45,7 @@ private:
     void updateBlockStates();
     BlockState getBlockState(uint32_t blockNum);
     QColor getBlockColor(BlockState state);
+    QColor getFileColor(uint32_t inodeNum);  // Generate unique color per file
     QString getBlockStateText(BlockState state);
     int getBlockSize() const;
     

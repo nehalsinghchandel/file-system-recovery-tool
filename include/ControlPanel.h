@@ -28,6 +28,13 @@ public:
     void setDiskMounted(bool mounted);
     void appendLog(const QString& message);
     void clearLog();
+    
+    // Public methods for triggering operations
+    void createFile(const QString& filename);
+    void writeRandomFiles(int numFiles);
+    void simulateCrash();
+    void runRecovery();
+    void runDefrag();
 
 signals:
     void mountRequested();
@@ -40,6 +47,7 @@ signals:
     void runRecoveryRequested();
     void runDefragRequested();
     void operationCompleted();
+    void logMessage(const QString& message);  // Signal for logging to central console
 
 private slots:
     void onMountClicked();
@@ -83,7 +91,6 @@ private:
     
     // Status
     QProgressBar* progressBar_;
-    QTextEdit* logOutput_;
 };
 
 } // namespace FileSystemTool
