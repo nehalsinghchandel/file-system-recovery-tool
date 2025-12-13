@@ -50,6 +50,9 @@ private slots:
     // Status updates
     void updateStatusBar();
     void updateAllWidgets();
+    
+    // Animated power cut write
+    void animatedBlockWrite();
 
 private:
     void setupUI();
@@ -87,6 +90,15 @@ private:
     QPushButton* recoveryBtn_;
     QPushButton* defragBtn_;
     QProgressBar* progressBar_;
+    
+    // Animated power cut state
+    QTimer* writeTimer_;
+    std::vector<uint8_t> pendingFileData_;
+    QString pendingFilename_;
+    uint32_t blocksWritten_;
+    uint32_t totalBlocksToWrite_;
+    uint32_t pendingInodeNum_;
+    std::vector<uint32_t> writtenBlocks_;
     
     // Helper methods
     // Status

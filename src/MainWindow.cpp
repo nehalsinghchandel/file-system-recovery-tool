@@ -28,13 +28,20 @@ namespace FileSystemTool {
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent),
       fileSystem_(nullptr),
-      defragMgr_(nullptr) {
+      defragMgr_(nullptr),
+      writeTimer_(new QTimer(this)),
+      blocksWritten_(0),
+      totalBlocksToWrite_(0),
+      pendingInodeNum_(0) {
     
     // Initialize random seed for random data generation
     srand(static_cast<unsigned>(time(nullptr)));
     
     setWindowTitle("File System Recovery Tool");
     setGeometry(100, 100, 1200, 750);
+    
+    // Connect timer for animated write
+    connect(writeTimer_, &QTimer::timeout, this, &MainWindow::animatedBlockWrite);
     
     setupUI();
     setupMenuBar();
@@ -614,46 +621,39 @@ void MainWindow::connectSignals() {
         logOutput_->append(QString("[⚡ POWER CUT] Simulating crash for file: %1").arg(filename));
         logOutput_->append(QString("[⚡ POWER CUT] File size: %1 KB (%2 blocks)").arg(fileSizeKB).arg(totalBlocks));
         logOutput_->append(QString("[⚡ POWER CUT] Will crash at 50% (%1 blocks written)").arg(blocksToWrite));
+        logOutput_->append("[⚡ POWER CUT] Writing blocks at 1 block/second...");
         
-        // 3. Simulate power cut during write (crashes at 50%)
-        if (fileSystem_->simulatePowerCutDuringWrite(filename.toStdString(), fileData, 0.5)) {
-            // 4. Get corrupted blocks for logging
-            auto corruptedBlocks = fileSystem_->getCorruptedBlocks();
-            
-            logOutput_->append(QString("[CORRUPTION] %1 blocks marked as CORRUPTED (BLACK):").arg(corruptedBlocks.size()));
-            for (uint32_t blockNum : corruptedBlocks) {
-                logOutput_->append(QString("  • Block %1").arg(blockNum));
-            }
-            
-            // 5. Disable all file operations
-            writeRandomBtn_->setEnabled(false);
-            createFileBtn_->setEnabled(false);
-            deleteFileBtn_->setEnabled(false);
-            readFileBtn_->setEnabled(false);
-            defragBtn_->setEnabled(false);
-            crashBtn_->setEnabled(false);
-            
-            // Enable ONLY recovery
-            recoveryBtn_->setEnabled(true);
-            
-            // 6. Update health chart to show corruption
-            int totalBlocks = fileSystem_->getDisk()->getTotalBlocks();
-            int freeBlocks = fileSystem_->getDisk()->getFreeBlocks();
-            int corruptedCount = corruptedBlocks.size();
-            int validUsedBlocks = totalBlocks - freeBlocks - corruptedCount;  // Blocks that are used AND not corrupted
-            performanceWidget_->updateHealthChart(freeBlocks, validUsedBlocks, corruptedCount);
-            
-            // 7. Refresh UI
-            blockMapWidget_->refresh();
-            fileBrowserWidget_->refresh();
-            performanceWidget_->updateMetrics();
-            
-            logOutput_->append("[⚠️ SYSTEM CORRUPTED] File operations DISABLED");
-            logOutput_->append("[💡 ACTION REQUIRED] Click 'Run Recovery' to fix corruption");
-            logOutput_->append("====================================");
-        } else {
-            logOutput_->append("[ERROR] Power cut simulation failed");
+        // Setup animated write state
+        pendingFileData_ = fileData;
+        pendingFilename_ = filename;
+        blocksWritten_ = 0;
+        totalBlocksToWrite_ = blocksToWrite;  // Only write 50% before crash
+        writtenBlocks_.clear();
+        
+        // Create the file and get its inode
+        if (!fileSystem_->createFile(filename.toStdString())) {
+            logOutput_->append("[ERROR] Failed to create file");
+            return;
         }
+        
+        int32_t inodeNum = fileSystem_->getDirectoryManager()->resolvePath(filename.toStdString(), 0);
+        if (inodeNum < 0) {
+            logOutput_->append("[ERROR] Failed to resolve file inode");
+            return;
+        }
+        pendingInodeNum_ = static_cast<uint32_t>(inodeNum);
+        
+        // Disable all buttons during animated write
+        writeRandomBtn_->setEnabled(false);
+        createFileBtn_->setEnabled(false);
+        deleteFileBtn_->setEnabled(false);
+        readFileBtn_->setEnabled(false);
+        defragBtn_->setEnabled(false);
+        crashBtn_->setEnabled(false);
+        recoveryBtn_->setEnabled(false);
+        
+        // Start the timer (1 block per second)
+        writeTimer_->start(1000);
     });
     
     // Recovery Button Handler
@@ -922,6 +922,87 @@ void MainWindow::closeEvent(QCloseEvent *event) {
         }
     } else {
         event->accept();
+    }
+}
+
+void MainWindow::animatedBlockWrite() {
+    if (blocksWritten_ >= totalBlocksToWrite_) {
+        // CRASH! Stop timer and mark blocks as corrupted
+        writeTimer_->stop();
+        
+        logOutput_->append(QString("[⚡ CRASH!] Power cut at block %1!").arg(blocksWritten_));
+        logOutput_->append(QString("[CORRUPTION] Marking %1 blocks as CORRUPTED (BLACK)").arg(writtenBlocks_.size()));
+        
+        // Mark all written blocks as corrupted
+        fileSystem_->setCorruptionState(writtenBlocks_, pendingInodeNum_);
+        
+        // Write bitmap to persist the allocations
+        fileSystem_->getDisk()->writeBitmap();
+        
+        // Refresh to show BLACK blocks
+        blockMapWidget_->refresh();
+        
+        // Update health chart
+        int totalBlocks = fileSystem_->getDisk()->getTotalBlocks();
+        int freeBlocks = fileSystem_->getDisk()->getFreeBlocks();
+        int corruptedCount = writtenBlocks_.size();
+        int validUsedBlocks = totalBlocks - freeBlocks - corruptedCount;
+        performanceWidget_->updateHealthChart(freeBlocks, validUsedBlocks, corruptedCount);
+        
+        // Enable ONLY recovery
+        recoveryBtn_->setEnabled(true);
+        
+        logOutput_->append("[⚠️ SYSTEM CORRUPTED] File operations DISABLED");
+        logOutput_->append("[💡 ACTION REQUIRED] Click 'Run Recovery' to fix corruption");
+        logOutput_->append("====================================");
+        
+        // Clear state
+        pendingFileData_.clear();
+        writtenBlocks_.clear();
+        return;
+    }
+    
+    // Write one block (shows as GREEN in bitmap)
+    size_t blockIndex = blocksWritten_;
+    size_t offset = blockIndex * 4096;
+    size_t bytesToWrite = std::min(static_cast<size_t>(4096), pendingFileData_.size() - offset);
+    
+    // Allocate and write block
+    int32_t blockNum = fileSystem_->getDisk()->allocateBlock();
+    if (blockNum >= 0) {
+        // Write data to block
+        std::vector<uint8_t> blockData(pendingFileData_.begin() + offset,
+                                        pendingFileData_.begin() + offset + bytesToWrite);
+        blockData.resize(4096, 0);
+        
+        fileSystem_->getDisk()->writeBlock(static_cast<uint32_t>(blockNum), blockData.data());
+        fileSystem_->setBlockOwner(static_cast<uint32_t>(blockNum), pendingInodeNum_);
+        
+        writtenBlocks_.push_back(static_cast<uint32_t>(blockNum));
+        blocksWritten_++;
+        
+        // Update progress bar
+        writeProgressBar_->setMaximum(totalBlocksToWrite_);
+        writeProgressBar_->setValue(blocksWritten_);
+        writeProgressBar_->setFormat(QString("Writing: %1/%2 blocks").arg(blocksWritten_).arg(totalBlocksToWrite_));
+        
+        // Refresh bitmap to show GREEN block
+        blockMapWidget_->refresh();
+        
+        logOutput_->append(QString("[WRITE] Block %1/%2 written → GREEN (block #%3)")
+                          .arg(blocksWritten_).arg(totalBlocksToWrite_).arg(blockNum));
+    } else {
+        // Failed to allocate - stop
+        writeTimer_->stop();
+        logOutput_->append("[ERROR] Failed to allocate block - stopping");
+        
+        // Re-enable buttons
+        writeRandomBtn_->setEnabled(true);
+        createFileBtn_->setEnabled(true);
+        deleteFileBtn_->setEnabled(true);
+        readFileBtn_->setEnabled(true);
+        defragBtn_->setEnabled(true);
+        crashBtn_->setEnabled(true);
     }
 }
 

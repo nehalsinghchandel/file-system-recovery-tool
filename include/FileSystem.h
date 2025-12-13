@@ -65,6 +65,7 @@ public:
     bool simulatePowerCutDuringWrite(const std::string& filename, 
                                       const std::vector<uint8_t>& fullData,
                                       double crashPercent);  // New method - interactive crash
+    void setCorruptionState(const std::vector<uint32_t>& corruptedBlocks, uint32_t inodeNum);  // For animated write
     bool hasCorruption() const { return hasCorruption_; }
     const std::vector<uint32_t>& getCorruptedBlocks() const { return corruptedBlocks_; }
     uint32_t getActiveWriteInode() const { return activeWriteInodeNum_; }

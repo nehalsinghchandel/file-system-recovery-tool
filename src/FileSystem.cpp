@@ -692,6 +692,12 @@ bool FileSystem::simulatePowerCutDuringWrite(const std::string& filename,
     return true;
 }
 
+void FileSystem::setCorruptionState(const std::vector<uint32_t>& corruptedBlocks, uint32_t inodeNum) {
+    corruptedBlocks_ = corruptedBlocks;
+    hasCorruption_ = true;
+    activeWriteInodeNum_ = inodeNum;
+}
+
 bool FileSystem::runRecovery() {
     if (!hasCorruption_) {
         std::cout << "[RECOVERY] No corruption detected" << std::endl;
