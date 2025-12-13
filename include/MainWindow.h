@@ -69,18 +69,23 @@ private:
     // Inline operation widgets
     QLineEdit* filenameInput_;
     QPushButton* createFileBtn_;
-    QPushButton* deleteFileBtn_;
     QPushButton* readFileBtn_;
+    QPushButton* deleteFileBtn_;
     QSlider* fileSizeSlider_;
     QLabel* fileSizeLabel_;
     QComboBox* numFilesCombo_;
     QPushButton* writeRandomBtn_;
-    QProgressBar* writeProgressBar_;  // For animated file writes
+    
+    // Progress bar for slow operations
+    QProgressBar* writeProgressBar_;
+    
+    // Recovery & Optimization buttons
     QPushButton* crashBtn_;
     QPushButton* recoveryBtn_;
     QPushButton* defragBtn_;
     QProgressBar* progressBar_;
     
+    // Helper methods
     // Status
     QLabel* statusLabel_;
     QString currentDiskPath_;

@@ -57,9 +57,21 @@ public:
     
     // Get statistics
     const FragmentationStats& getLastStats() const { return lastStats_; }
-    const BenchmarkResults& getBeforeDefragBenchmark() const { return beforeBenchmark_; }
-    const BenchmarkResults& getAfterDefragBenchmark() const { return afterBenchmark_; }
+    // Get benchmark results
+    BenchmarkResults getBeforeDefragBenchmark() const { return beforeBenchmark_; }
+    BenchmarkResults getAfterDefragBenchmark() const { return afterBenchmark_; }
     
+    // Simple struct to return defrag results
+    struct DefragResults {
+        uint32_t filesDefragged;
+        double avgReadTimeBefore;
+        double avgReadTimeAfter;
+    };
+    DefragResults getResults() const {
+        return {0, beforeBenchmark_.avgReadTimeMs, afterBenchmark_.avgReadTimeMs};
+    }
+    
+    // Progress reporting
 private:
     FileSystem* fs_;
     FragmentationStats lastStats_;

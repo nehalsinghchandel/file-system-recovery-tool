@@ -611,14 +611,24 @@ bool FileSystem::runRecovery() {
         std::cout << "[RECOVERY] Freed corrupted block " << blockNum << std::endl;
     }
     
-    // Delete the corrupted file's inode
+    // ONLY delete the corrupted file's inode (not all files!)
     if (activeWriteInodeNum_ != UINT32_MAX) {
         Inode inode;
         if (inodeMgr_->readInode(activeWriteInodeNum_, inode)) {
-            // Clear the inode
+            // Get the filename before clearing inode
+            std::string corruptedFilename = getFilenameFromInode(activeWriteInodeNum_);
+            
+            std::cout << "[RECOVERY] Clearing corrupted inode " << activeWriteInodeNum_;
+            if (!corruptedFilename.empty()) {
+                std::cout << " (file: " << corruptedFilename << ")";
+            }
+            std::cout << std::endl;
+            
+            // Clear the inode using reset()
             inode.reset();
+            
+            // Write back the cleared inode
             inodeMgr_->writeInode(activeWriteInodeNum_, inode);
-            std::cout << "[RECOVERY] Cleared corrupted inode " << activeWriteInodeNum_ << std::endl;
         }
     }
     
