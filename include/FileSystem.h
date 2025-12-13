@@ -60,8 +60,11 @@ public:
     void clearBlockOwner(uint32_t blockNum);
     void rebuildBlockOwnership();  // Rebuild ownership map from disk state
     
-    // Power Cut Simulation & Recovery
-    void simulatePowerCut();  // Mark current write as corrupted
+    // Power cut simulation & recovery
+    void simulatePowerCut();  // Old method - marks active write as corrupted
+    bool simulatePowerCutDuringWrite(const std::string& filename, 
+                                      const std::vector<uint8_t>& fullData,
+                                      double crashPercent);  // New method - interactive crash
     bool hasCorruption() const { return hasCorruption_; }
     const std::vector<uint32_t>& getCorruptedBlocks() const { return corruptedBlocks_; }
     uint32_t getActiveWriteInode() const { return activeWriteInodeNum_; }

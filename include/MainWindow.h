@@ -15,6 +15,8 @@
 #include <QSlider>
 #include <QFrame>
 #include <QScrollArea>
+#include <QInputDialog>
+#include <QTimer>
 #include <memory>
 #include "FileSystem.h"
 #include "RecoveryManager.h"

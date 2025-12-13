@@ -1,7 +1,9 @@
 #include "FileSystem.h"
 #include <iostream>
+#include <cstring>
 #include <chrono>
 #include <algorithm>
+#include <set>
 
 namespace FileSystemTool {
 
@@ -415,6 +417,9 @@ bool FileSystem::allocateFileBlocks(Inode& inode, uint32_t blocksNeeded, uint32_
         }
         inode.indirectBlock = indirectBlockNum;
         
+        // CRITICAL FIX: Set ownership for indirect block itself
+        setBlockOwner(static_cast<uint32_t>(indirectBlockNum), inodeNum);
+        
         // Allocate data blocks referenced by indirect block
         std::vector<uint8_t> indirectData(BLOCK_SIZE, 0);
         int32_t* pointers = reinterpret_cast<int32_t*>(indirectData.data());
@@ -593,6 +598,98 @@ void FileSystem::simulatePowerCut() {
             inodeMgr_->writeInode(lastModifiedInode, inode);
         }
     }
+    
+    hasCorruption_ = true;
+    activeWriteInodeNum_ = UINT32_MAX;  // Mark that we don't know which file yet
+    
+    std::cout << "[CRASH] Power cut simulated! " << corruptedBlocks_.size() 
+              << " blocks are now corrupted" << std::endl;
+}
+
+bool FileSystem::simulatePowerCutDuringWrite(const std::string& filename,
+                                               const std::vector<uint8_t>& fullData,
+                                               double crashPercent) {
+    if (!mounted_) return false;
+    
+    std::cout << "[POWER CUT] Starting file write simulation..." << std::endl;
+    std::cout << "[POWER CUT] File: " << filename << ", Size: " << fullData.size() << " bytes" << std::endl;
+    
+    // Calculate how much to write before crash
+    size_t crashPoint = static_cast<size_t>(fullData.size() * crashPercent);
+    uint32_t blocksToWrite = (crashPoint + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    uint32_t totalBlocks = (fullData.size() + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    
+    std::cout << "[POWER CUT] Will crash at " << (crashPercent * 100) << "% (" 
+              << crashPoint << " bytes, " << blocksToWrite << "/" << totalBlocks << " blocks)" << std::endl;
+    
+    // 1. Create the file
+    if (!createFile(filename)) {
+        std::cerr << "[ERROR] Failed to create file for power cut simulation" << std::endl;
+        return false;
+    }
+    
+    // 2. Get the inode number
+    int32_t inodeNum = dirMgr_->resolvePath(filename, 0);
+    if (inodeNum < 0) {
+        std::cerr << "[ERROR] Failed to resolve new file inode" << std::endl;
+        return false;
+    }
+    
+    Inode inode;
+    if (!inodeMgr_->readInode(static_cast<uint32_t>(inodeNum), inode)) {
+        std::cerr << "[ERROR] Failed to read inode" << std::endl;
+        return false;
+    }
+    
+    // 3. Allocate blocks for partial write
+    std::vector<uint32_t> allocatedBlocks;
+    for (uint32_t i = 0; i < blocksToWrite && i < 12; ++i) {
+        int32_t blockNum = disk_->allocateBlock();
+        if (blockNum < 0) {
+            std::cerr << "[ERROR] Failed to allocate block " << i << std::endl;
+            return false;
+        }
+        
+        inode.directBlocks[i] = static_cast<uint32_t>(blockNum);
+        allocatedBlocks.push_back(static_cast<uint32_t>(blockNum));
+        setBlockOwner(static_cast<uint32_t>(blockNum), static_cast<uint32_t>(inodeNum));
+        
+        // Write the data to this block
+        size_t offset = i * BLOCK_SIZE;
+        size_t bytesToWrite = std::min(static_cast<size_t>(BLOCK_SIZE), fullData.size() - offset);
+        std::vector<uint8_t> blockData(fullData.begin() + offset, 
+                                        fullData.begin() + offset + bytesToWrite);
+        blockData.resize(BLOCK_SIZE, 0);  // Pad to block size
+        
+        disk_->writeBlock(static_cast<uint32_t>(blockNum), blockData.data());
+        
+        std::cout << "[POWER CUT] Wrote block " << (i+1) << "/" << blocksToWrite 
+                  << " (block #" << blockNum << ")" << std::endl;
+    }
+    
+    // 4. Update inode with partial data (this creates the inconsistency)
+    inode.fileSize = crashPoint;  // File size shows partial write
+    inode.blockCount = blocksToWrite;
+    inodeMgr_->writeInode(static_cast<uint32_t>(inodeNum), inode);
+    
+    // 5. Write bitmap to persist allocated blocks
+    disk_->writeBitmap();
+    
+    // 6. SIMULATE CRASH: Mark all written blocks as corrupted
+    std::cout << "[POWER CUT] ⚡ CRASH! Marking " << allocatedBlocks.size() << " blocks as corrupted..." << std::endl;
+    
+    corruptedBlocks_ = allocatedBlocks;
+    hasCorruption_ = true;
+    activeWriteInodeNum_ = static_cast<uint32_t>(inodeNum);
+    
+    std::cout << "[POWER CUT] File system is now in CORRUPTED state" << std::endl;
+    std::cout << "[POWER CUT] Corrupted blocks: ";
+    for (uint32_t blockNum : corruptedBlocks_) {
+        std::cout << blockNum << " ";
+    }
+    std::cout << std::endl;
+    
+    return true;
 }
 
 bool FileSystem::runRecovery() {
@@ -604,31 +701,63 @@ bool FileSystem::runRecovery() {
     std::cout << "[RECOVERY] Starting recovery process..." << std::endl;
     std::cout << "[RECOVERY] Found " << corruptedBlocks_.size() << " corrupted blocks" << std::endl;
     
-    // Free all corrupted blocks
+    // Step 2: Free the corrupted blocks from bitmap
     for (uint32_t blockNum : corruptedBlocks_) {
         disk_->freeBlock(blockNum);
-        clearBlockOwner(blockNum);
         std::cout << "[RECOVERY] Freed corrupted block " << blockNum << std::endl;
     }
     
-    // ONLY delete the corrupted file's inode (not all files!)
-    if (activeWriteInodeNum_ != UINT32_MAX) {
-        Inode inode;
-        if (inodeMgr_->readInode(activeWriteInodeNum_, inode)) {
-            // Get the filename before clearing inode
-            std::string corruptedFilename = getFilenameFromInode(activeWriteInodeNum_);
-            
-            std::cout << "[RECOVERY] Clearing corrupted inode " << activeWriteInodeNum_;
-            if (!corruptedFilename.empty()) {
-                std::cout << " (file: " << corruptedFilename << ")";
+    // Step 3: Find which inode(s) reference these corrupted blocks
+    std::set<uint32_t> affectedInodes;
+    
+    for (uint32_t blockNum : corruptedBlocks_) {
+        // Check all inodes to see which one references this block
+        for (uint32_t inodeNum = 1; inodeNum < 128; ++inodeNum) {  // Start from 1, skip inode 0 (root dir)
+            Inode inode;
+            if (inodeMgr_->readInode(inodeNum, inode) && inode.isValid()) {
+                // Check if this inode references the corrupted block
+                for (int i = 0; i < 12 && inode.directBlocks[i] != 0; ++i) {
+                    if (inode.directBlocks[i] == blockNum) {
+                        affectedInodes.insert(inodeNum);
+                        break;
+                    }
+                }
             }
-            std::cout << std::endl;
+        }
+    }
+    
+    // Step 4: Clear only the affected inodes (corrupted files)
+    for (uint32_t inodeNum : affectedInodes) {
+        if (inodeNum == 0) {
+            std::cout << "[RECOVERY] WARNING: Skipping inode 0 (root directory)" << std::endl;
+            continue;  // Never delete the root directory
+        }
+        
+        Inode inode;
+        if (inodeMgr_->readInode(inodeNum, inode)) {
+            // Remove from directory first
+            auto entries = listDir("/");
+            for (const auto& entry : entries) {
+                if (entry.inodeNumber == inodeNum) {
+                    // Remove this entry from root directory
+                    dirMgr_->removeEntry(0, entry.getName());  // 0 = root inode
+                    break;
+                }
+            }
             
-            // Clear the inode using reset()
-            inode.reset();
+            // Free all blocks referenced by this inode
+            for (uint32_t i = 0; i < 12 && inode.directBlocks[i] != 0; ++i) {
+                // Only free if not already freed (not in corrupted list)
+                bool alreadyFreed = (std::find(corruptedBlocks_.begin(), corruptedBlocks_.end(), 
+                                              inode.directBlocks[i]) != corruptedBlocks_.end());
+                if (!alreadyFreed) {
+                    disk_->freeBlock(inode.directBlocks[i]);
+                }
+            }
             
-            // Write back the cleared inode
-            inodeMgr_->writeInode(activeWriteInodeNum_, inode);
+            // Clear the inode
+            inodeMgr_->freeInode(inodeNum);
+            std::cout << "[RECOVERY] Cleared corrupted inode " << inodeNum << std::endl;
         }
     }
     
@@ -636,10 +765,10 @@ bool FileSystem::runRecovery() {
     disk_->writeBitmap();
     disk_->writeSuperblock();
     
-    // Clear corruption state
+    // Clear the corruption state
     hasCorruption_ = false;
     corruptedBlocks_.clear();
-    activeWriteInodeNum_ = UINT32_MAX;
+    activeWriteInodeNum_ = 0;
     
     std::cout << "[RECOVERY] Recovery complete! File system is now consistent." << std::endl;
     return true;

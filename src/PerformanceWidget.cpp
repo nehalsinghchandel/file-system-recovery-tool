@@ -75,26 +75,36 @@ void PerformanceWidget::setupUI() {
     mainLayout->addWidget(metricsGroup);
     mainLayout->addWidget(latencyChartView_);
     mainLayout->addWidget(chartsGroup);
+    
+    // Initialize chaos chart with starting fragmentation if file system is set
+    if (fileSystem_) {
+        updateChaosChart();
+    }
 }
 
 void PerformanceWidget::setupLatencyChart() {
     latencyChart_ = new QChart();
     latencyChart_->setTitle("Read/Write Latency");
-    latencyChart_->setAnimationOptions(QChart::SeriesAnimations);
+    latencyChart_->legend()->hide();
     
     readLatencySeries_ = new QLineSeries();
     readLatencySeries_->setName("Read Latency");
+    readLatencySeries_->setColor(QColor(52, 152, 219));  // Blue
     
     writeLatencySeries_ = new QLineSeries();
-    writeLatencySeries_->setName("Write Latency");
+    writeLatencySeries_->setName("Write Latency");  
+    writeLatencySeries_->setColor(QColor(46, 204, 113));  // Green
     
     latencyChart_->addSeries(readLatencySeries_);
     latencyChart_->addSeries(writeLatencySeries_);
     latencyChart_->createDefaultAxes();
+    latencyChart_->legend()->setVisible(true);
+    latencyChart_->legend()->setAlignment(Qt::AlignBottom);
     
     latencyChartView_ = new QChartView(latencyChart_, this);
     latencyChartView_->setRenderHint(QPainter::Antialiasing);
-    latencyChartView_->setMinimumHeight(200);
+    latencyChartView_->setMinimumHeight(120);
+    latencyChartView_->setMaximumHeight(180);
 }
 
 void PerformanceWidget::updateMetrics() {
@@ -154,22 +164,46 @@ void PerformanceWidget::recordReadOperation(double latencyMs) {
         readLatencySeries_->append(i, readLatencies_[i]);
     }
     
+    // Update axes ranges dynamically
+    if (!latencyChart_->axes(Qt::Horizontal).isEmpty() && !latencyChart_->axes(Qt::Vertical).isEmpty()) {
+        latencyChart_->axes(Qt::Horizontal).first()->setRange(0, std::max(10.0, (double)readLatencies_.size()));
+        
+        // Find max latency for Y axis
+        double maxLatency = 1.0;
+        for (auto val : readLatencies_) maxLatency = std::max(maxLatency, val);
+        for (auto val : writeLatencies_) maxLatency = std::max(maxLatency, val);
+        latencyChart_->axes(Qt::Vertical).first()->setRange(0, maxLatency * 1.2);
+    }
+    
+    latencyChart_->update();
+    latencyChartView_->update();
     updateMetrics();
 }
 
 void PerformanceWidget::recordWriteOperation(double latencyMs) {
     writeLatencies_.push_back(latencyMs);
-    
     if (writeLatencies_.size() > MAX_DATA_POINTS) {
         writeLatencies_.pop_front();
     }
     
-    // Update chart
+    // Update the chart series  
     writeLatencySeries_->clear();
     for (size_t i = 0; i < writeLatencies_.size(); ++i) {
         writeLatencySeries_->append(i, writeLatencies_[i]);
     }
     
+    // Update axes ranges dynamically
+    if (!latencyChart_->axes(Qt::Horizontal).isEmpty() && !latencyChart_->axes(Qt::Vertical).isEmpty()) {
+        latencyChart_->axes(Qt::Horizontal).first()->setRange(0, std::max(10.0, (double)writeLatencies_.size()));
+        
+        double maxLatency = 1.0;
+        for (auto val : readLatencies_) maxLatency = std::max(maxLatency, val);
+        for (auto val : writeLatencies_) maxLatency = std::max(maxLatency, val);
+        latencyChart_->axes(Qt::Vertical).first()->setRange(0, maxLatency * 1.2);
+    }
+    
+    latencyChart_->update();
+    latencyChartView_->update();
     updateMetrics();
 }
 
@@ -286,7 +320,7 @@ void PerformanceWidget::setupChaosChart() {
     
     QValueAxis* axisY = new QValueAxis();
     axisY->setTitleText("Fragmentation (%)");
-    axisY->setRange(0, 100);
+    axisY->setRange(0, 20);  // Changed from 0-100 to 0-20 for better visibility
     
     chaosChart_->addAxis(axisX, Qt::AlignBottom);
     chaosChart_->addAxis(axisY, Qt::AlignLeft);
@@ -309,6 +343,23 @@ void PerformanceWidget::updatePerformanceChart(const std::vector<FilePerformance
         performanceSeries_->remove(performanceSeries_->barSets().at(0));
     }
     
+    if (data.empty()) {
+        // Add placeholder data to show chart structure
+        QBarSet* fragmentedSet = new QBarSet("Fragmented");
+        fragmentedSet->setColor(QColor(231, 76, 60));
+        fragmentedSet->append(0);
+        
+        QBarSet* defraggedSet = new QBarSet("Defragmented");
+        defraggedSet->setColor(QColor(46, 204, 113));
+        defraggedSet->append(0);
+        
+        performanceSeries_->append(fragmentedSet);
+        performanceSeries_->append(defraggedSet);
+        
+        performanceChart_->setTitle("Performance: Before vs After Defragmentation (No data yet)");
+        return;
+    }
+    
     QBarSet* fragmentedSet = new QBarSet("Fragmented");
     fragmentedSet->setColor(QColor(231, 76, 60));
     
@@ -322,15 +373,69 @@ void PerformanceWidget::updatePerformanceChart(const std::vector<FilePerformance
     
     performanceSeries_->append(fragmentedSet);
     performanceSeries_->append(defraggedSet);
+    
+    performanceChart_->setTitle(QString("Performance: Before vs After Defragmentation (%1 files)").arg(data.size()));
 }
 
 void PerformanceWidget::updateHealthChart(int freeBlocks, int validBlocks, int orphanedBlocks) {
-    // Update stacked bar series with new data
-    if (healthSeries_->count() >= 3) {
-        healthSeries_->barSets().at(0)->append(freeBlocks);     // Free
-        healthSeries_->barSets().at(1)->append(validBlocks);    // Valid
-        healthSeries_->barSets().at(2)->append(orphanedBlocks); // Orphaned
+    // The health chart shows three states: Normal, After Crash, After Recovery
+    // We need to determine which state we're updating based on orphanedBlocks
+    
+    if (healthSeries_->count() < 3) return;
+    
+    // Get the three bar sets
+    QBarSet* freeSet = healthSeries_->barSets().at(0);
+    QBarSet* validSet = healthSeries_->barSets().at(1);
+    QBarSet* orphanedSet = healthSeries_->barSets().at(2);
+    
+    if (orphanedBlocks > 0) {
+        // CRASH STATE: Update the middle column (After Crash)
+        // Make sure we have at least 2 data points
+        while (freeSet->count() < 2) {
+            freeSet->append(0);
+            validSet->append(0);
+            orphanedSet->append(0);
+        }
+        
+        // Update column 1 (After Crash)
+        freeSet->replace(1, freeBlocks);
+        validSet->replace(1, validBlocks);
+        orphanedSet->replace(1, orphanedBlocks);
+        
+    } else if (freeSet->count() >= 2) {
+        // RECOVERY STATE: Update the third column (After Recovery)
+        // Make sure we have 3 data points
+        while (freeSet->count() < 3) {
+            freeSet->append(0);
+            validSet->append(0);
+            orphanedSet->append(0);
+        }
+        
+        // Update column 2 (After Recovery)
+        freeSet->replace(2, freeBlocks);
+        validSet->replace(2, validBlocks);
+        orphanedSet->replace(2, 0);  // No orphaned blocks after recovery
+        
+    } else {
+        // NORMAL STATE: Initialize the first column
+        // Clear any existing data
+        freeSet->remove(0, freeSet->count());
+        validSet->remove(0, validSet->count());
+        orphanedSet->remove(0, orphanedSet->count());
+        
+        // Add column 0 (Normal)
+        freeSet->append(freeBlocks);
+        validSet->append(validBlocks);
+        orphanedSet->append(0);  // No orphaned blocks in normal state
     }
+    
+    // Update Y-axis range to fit the data
+    int maxValue = std::max({freeBlocks, validBlocks, orphanedBlocks, 100});
+    if (!healthChart_->axes(Qt::Vertical).isEmpty()) {
+        healthChart_->axes(Qt::Vertical).first()->setRange(0, maxValue * 1.1);
+    }
+    
+    healthChart_->update();
 }
 
 void PerformanceWidget::updateChaosChart() {
@@ -348,9 +453,10 @@ void PerformanceWidget::updateChaosChart() {
     }
 }
 
+
 void PerformanceWidget::recordOperation() {
     operationCount_++;
-    updateChaosChart();
+    // Don't update chaos chart here - will update when user opens the dialog
 }
 
 // Dialog methods to show charts in modal windows
@@ -391,8 +497,11 @@ void PerformanceWidget::showHealthChartDialog() {
 }
 
 void PerformanceWidget::showChaosChartDialog() {
+    // Update chart with latest data before showing
+    updateChaosChart();
+    
     QDialog* dialog = new QDialog(this);
-    dialog->setWindowTitle("Fragmentation Lifecycle");
+    dialog->setWindowTitle("Fragmentation Lifecycle Over Operations");
     dialog->resize(800, 600);
     
     QVBoxLayout* layout = new QVBoxLayout(dialog);

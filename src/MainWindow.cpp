@@ -21,14 +21,20 @@
 #include <ctime>    // for time()
 #include <QCloseEvent>
 #include <iostream>
+#include <QDateTime>
 
 namespace FileSystemTool {
 
 MainWindow::MainWindow(QWidget *parent)
-    : QMainWindow(parent), fileSystem_(nullptr), recoveryMgr_(nullptr), defragMgr_(nullptr) {
+    : QMainWindow(parent),
+      fileSystem_(nullptr),
+      defragMgr_(nullptr) {
     
     // Initialize random seed for random data generation
     srand(static_cast<unsigned>(time(nullptr)));
+    
+    setWindowTitle("File System Recovery Tool");
+    setGeometry(100, 100, 1200, 750);
     
     setupUI();
     setupMenuBar();
@@ -37,7 +43,6 @@ MainWindow::MainWindow(QWidget *parent)
     statusLabel_ = new QLabel("No disk mounted", this);
     statusBar()->addWidget(statusLabel_);
     
-    setWindowTitle("File System Recovery Tool");
     resize(1400, 900);
 }
 
@@ -388,13 +393,20 @@ void MainWindow::connectSignals() {
         }
         
         // Actual read
+        auto startTime = std::chrono::high_resolution_clock::now();
         if (fileSystem_->readFile(filename.toStdString(), data)) {
+            auto endTime = std::chrono::high_resolution_clock::now();
+            double latencyMs = std::chrono::duration<double, std::milli>(endTime - startTime).count();
+            
             logOutput_->append(QString("[SUCCESS] Read file: %1 (%2 bytes, %3 blocks)")
                              .arg(filename).arg(data.size()).arg(blocksToRead));
             // Show first 200 bytes as preview
             QString preview = QString::fromUtf8(reinterpret_cast<const char*>(data.data()), 
                                                std::min(200, (int)data.size()));
             logOutput_->append(QString("Preview: %1...").arg(preview));
+            
+            // Record read latency for graph
+            performanceWidget_->recordReadOperation(latencyMs);
         } else {
             logOutput_->append(QString("[ERROR] Failed to read file: %1").arg(filename));
         }
@@ -490,6 +502,11 @@ void MainWindow::connectSignals() {
         createFileBtn_->setEnabled(true);
         writeRandomBtn_->setEnabled(true);
         
+        // Update widgets and graphs
+        performanceWidget_->updateMetrics();
+        performanceWidget_->recordOperation();  // Track fragmentation
+        performanceWidget_->recordWriteOperation(elapsedMs / blocksNeeded);  // Avg per block
+        
         updateAllWidgets();
     });
     
@@ -509,8 +526,11 @@ void MainWindow::connectSignals() {
         
         std::vector<uint8_t> fileData(4096, 0xBB);  // 4KB file with pattern
         
+        // Use timestamp to ensure unique filenames on multiple clicks
+        qint64 timestamp = QDateTime::currentMSecsSinceEpoch() / 1000;  // Unix timestamp
+        
         for (int i = 0; i < numFiles; ++i) {
-            QString filename = QString("/random_%1.dat").arg(i + 1);
+            QString filename = QString("/random_%1_%2.dat").arg(timestamp).arg(i + 1);
             
             // Create and write file
             if (fileSystem_->createFile(filename.toStdString()) &&
@@ -527,6 +547,8 @@ void MainWindow::connectSignals() {
                 
                 QApplication::processEvents();
                 QThread::msleep(100);  // Small delay for visibility
+            } else {
+                logOutput_->append(QString("[ERROR] Failed to create file: %1").arg(filename));
             }
         }
         
@@ -543,68 +565,96 @@ void MainWindow::connectSignals() {
         updateAllWidgets();
     });
     
-    // Recovery operation buttons
-    connect(crashBtn_, &QPushButton::clicked, this, [this]() {
-        controlPanel_->simulateCrash();
-        updateAllWidgets();
-    });
-    
-    connect(recoveryBtn_, &QPushButton::clicked, this, [this]() {
-        controlPanel_->runRecovery();
-        updateAllWidgets();
-    });
-    
-    // Power Cut Simulation Button Handler
+    // Power Cut Button Handler - New Interactive Flow
     connect(crashBtn_, &QPushButton::clicked, this, [this]() {
         if (!fileSystem_ || !fileSystem_->isMounted()) {
             logOutput_->append("[ERROR] No disk mounted");
             return;
         }
         
-        // Capture state before crash
-        int freeBlocksBefore = fileSystem_->getDisk()->getFreeBlocks();
-        int totalBlocks = fileSystem_->getDisk()->getTotalBlocks();
-        int usedBlocksBefore = totalBlocks - freeBlocksBefore;
+        // 1. Ask user for filename
+        bool ok;
+        QString filename = QInputDialog::getText(this, "Simulate Power Cut",
+                                                  "Enter filename for large file:",
+                                                  QLineEdit::Normal,
+                                                  "largefile.dat", &ok);
         
-        logOutput_->append("====================================");
-        logOutput_->append("[⚡ POWER CUT] Simulating power failure!");
-        
-        // Simulate power cut
-        fileSystem_->simulatePowerCut();
-        
-        // Log corrupted blocks
-        auto corruptedBlocks = fileSystem_->getCorruptedBlocks();
-        int orphanedCount = corruptedBlocks.size();
-        
-        logOutput_->append(QString("[CORRUPTION] Found %1 orphaned blocks from inode %2")
-                          .arg(orphanedCount)
-                          .arg(fileSystem_->getActiveWriteInode()));
-        
-        for (uint32_t blockNum : corruptedBlocks) {
-            logOutput_->append(QString("  • Block %1 (BLACK on bitmap)").arg(blockNum));
+        if (!ok || filename.isEmpty()) {
+            logOutput_->append("[INFO] Power cut simulation cancelled");
+            return;
         }
         
-        // Disable write operations
-        writeRandomBtn_->setEnabled(false);
-        createFileBtn_->setEnabled(false);
-        defragBtn_->setEnabled(false);
-        crashBtn_->setEnabled(false);
+        // 2. Ask user for file size (20-100 KB)
+        int fileSizeKB = QInputDialog::getInt(this, "Simulate Power Cut",
+                                               "Enter file size in KB (20-100):",
+                                               40,      // default
+                                               20,      // min
+                                               100,     // max
+                                               5,       // step
+                                               &ok);
         
-        // Enable ONLY recovery
-        recoveryBtn_->setEnabled(true);
+        if (!ok) {
+            logOutput_->append("[INFO] Power cut simulation cancelled");
+            return;
+        }
         
-        // Update health chart: After Crash state
-        int freeBlocksAfter = freeBlocksBefore - orphanedCount;
-        performanceWidget_->updateHealthChart(freeBlocksAfter, usedBlocksBefore, orphanedCount);
+        // Add leading slash if not present
+        if (!filename.startsWith("/")) {
+            filename = "/" + filename;
+        }
         
-        // Refresh UI to show corrupted blocks
-        blockMapWidget_->refresh();
-        fileBrowserWidget_->refresh();
-        performanceWidget_->updateMetrics();
-        logOutput_->append("[⚠️ SYSTEM CORRUPTED] File operations DISABLED");
-        logOutput_->append("[💡 ACTION REQUIRED] Click 'Run Recovery' to fix corruption");
+        // 3. Create file data based on user's size selection
+        int fileSizeBytes = fileSizeKB * 1024;
+        std::vector<uint8_t> fileData(fileSizeBytes, 0xCC);  // Fill with pattern 0xCC
+        
+        int totalBlocks = (fileSizeBytes + 4095) / 4096;
+        int blocksToWrite = totalBlocks / 2;  // 50%
+        
         logOutput_->append("====================================");
-    });    
+        logOutput_->append(QString("[⚡ POWER CUT] Simulating crash for file: %1").arg(filename));
+        logOutput_->append(QString("[⚡ POWER CUT] File size: %1 KB (%2 blocks)").arg(fileSizeKB).arg(totalBlocks));
+        logOutput_->append(QString("[⚡ POWER CUT] Will crash at 50% (%1 blocks written)").arg(blocksToWrite));
+        
+        // 3. Simulate power cut during write (crashes at 50%)
+        if (fileSystem_->simulatePowerCutDuringWrite(filename.toStdString(), fileData, 0.5)) {
+            // 4. Get corrupted blocks for logging
+            auto corruptedBlocks = fileSystem_->getCorruptedBlocks();
+            
+            logOutput_->append(QString("[CORRUPTION] %1 blocks marked as CORRUPTED (BLACK):").arg(corruptedBlocks.size()));
+            for (uint32_t blockNum : corruptedBlocks) {
+                logOutput_->append(QString("  • Block %1").arg(blockNum));
+            }
+            
+            // 5. Disable all file operations
+            writeRandomBtn_->setEnabled(false);
+            createFileBtn_->setEnabled(false);
+            deleteFileBtn_->setEnabled(false);
+            readFileBtn_->setEnabled(false);
+            defragBtn_->setEnabled(false);
+            crashBtn_->setEnabled(false);
+            
+            // Enable ONLY recovery
+            recoveryBtn_->setEnabled(true);
+            
+            // 6. Update health chart to show corruption
+            int totalBlocks = fileSystem_->getDisk()->getTotalBlocks();
+            int freeBlocks = fileSystem_->getDisk()->getFreeBlocks();
+            int corruptedCount = corruptedBlocks.size();
+            int validUsedBlocks = totalBlocks - freeBlocks - corruptedCount;  // Blocks that are used AND not corrupted
+            performanceWidget_->updateHealthChart(freeBlocks, validUsedBlocks, corruptedCount);
+            
+            // 7. Refresh UI
+            blockMapWidget_->refresh();
+            fileBrowserWidget_->refresh();
+            performanceWidget_->updateMetrics();
+            
+            logOutput_->append("[⚠️ SYSTEM CORRUPTED] File operations DISABLED");
+            logOutput_->append("[💡 ACTION REQUIRED] Click 'Run Recovery' to fix corruption");
+            logOutput_->append("====================================");
+        } else {
+            logOutput_->append("[ERROR] Power cut simulation failed");
+        }
+    });
     
     // Recovery Button Handler
     connect(recoveryBtn_, &QPushButton::clicked, this, [this]() {
@@ -614,33 +664,33 @@ void MainWindow::connectSignals() {
         }
         
         if (!fileSystem_->hasCorruption()) {
-            logOutput_->append("[INFO] No corruption detected");
+            logOutput_->append("[INFO] No corruption detected - system is healthy");
             return;
         }
         
         logOutput_->append("====================================");
-        logOutput_->append("[🔧 RECOVERY] Starting file system recovery...");
+        logOutput_->append("[🔧 RECOVERY] Starting recovery process...");
         
         // Run recovery
-        bool success = fileSystem_->runRecovery();
-        
-        if (success) {
-            logOutput_->append("[✅ SUCCESS] Recovery complete!");
-            logOutput_->append("[INFO] Corrupted blocks have been freed");
-            logOutput_->append("[INFO] File system is now consistent");
-            
-            // Re-enable operations
-            writeRandomBtn_->setEnabled(true);
-            createFileBtn_->setEnabled(true);
-            defragBtn_->setEnabled(true);
-            crashBtn_->setEnabled(true);
-            recoveryBtn_->setEnabled(false);
-            
-            // Update health chart: After Recovery state (no more orphaned blocks)
+        if (fileSystem_->runRecovery()) {
             int freeBlocks = fileSystem_->getDisk()->getFreeBlocks();
             int totalBlocks = fileSystem_->getDisk()->getTotalBlocks();
             int usedBlocks = totalBlocks - freeBlocks;
+            
+            logOutput_->append("[SUCCESS] File system recovered successfully!");
+            logOutput_->append(QString("[STATUS] Free blocks: %1, Used blocks: %2").arg(freeBlocks).arg(usedBlocks));
+            
+            // Update health chart: After Recovery state (no orphaned blocks)
             performanceWidget_->updateHealthChart(freeBlocks, usedBlocks, 0);
+            
+            // Re-enable all operations
+            writeRandomBtn_->setEnabled(true);
+            createFileBtn_->setEnabled(true);
+            deleteFileBtn_->setEnabled(true);
+            readFileBtn_->setEnabled(true);
+            defragBtn_->setEnabled(true);
+            crashBtn_->setEnabled(true);
+            recoveryBtn_->setEnabled(false);
             
             // Refresh UI
             blockMapWidget_->refresh();
@@ -677,11 +727,17 @@ void MainWindow::connectSignals() {
         blockMapWidget_->refresh();
         
         fileBrowserWidget_->setFileSystem(fileSystem_.get());
-        fileBrowserWidget_->refresh();
-        
         performanceWidget_->setFileSystem(fileSystem_.get());
+        performanceWidget_->setDefragManager(defragMgr_.get());
         performanceWidget_->updateMetrics();
         
+        // Initialize health chart with "Normal" state
+        int freeBlocks = fileSystem_->getDisk()->getFreeBlocks();
+        int totalBlocks = fileSystem_->getDisk()->getTotalBlocks();
+        int usedBlocks = totalBlocks - freeBlocks;
+        performanceWidget_->updateHealthChart(freeBlocks, usedBlocks, 0);
+        
+        updateAllWidgets();
         progressBar_->setValue(100);
         logOutput_->append("[SUCCESS] Defragmentation complete - check bitmap and file fragments");
         

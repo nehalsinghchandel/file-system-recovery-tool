@@ -99,6 +99,8 @@ void BlockMapWidget::mouseMoveEvent(QMouseEvent *event) {
                 case BlockState::USED: stateStr = "Used"; break;
                 case BlockState::SUPERBLOCK: stateStr = "Superblock"; break;
                 case BlockState::INODE_TABLE: stateStr = "Inode Table"; break;
+                case BlockState::CORRUPTED: stateStr = "Corrupted"; break; // Added for corrupted block visualization
+                case BlockState::JOURNAL: stateStr = "Journal"; break; // Added for journal block visualization
                 default: stateStr = "Unknown"; break;
             }
             
