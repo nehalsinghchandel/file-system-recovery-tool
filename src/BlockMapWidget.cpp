@@ -9,11 +9,10 @@ namespace FileSystemTool {
 
 BlockMapWidget::BlockMapWidget(QWidget *parent) 
     : QWidget(parent), fileSystem_(nullptr), totalBlocks_(0), 
-      hoveredBlock_(UINT32_MAX), zoomLevel_(1.0), blocksPerRow_(64),
-      blockDisplaySize_(10), blockSpacing_(1) {
-    
-   setMinimumSize(600, 400);
+      hoveredBlock_(UINT32_MAX), blockDisplaySize_(10), zoomLevel_(1.0), blocksPerRow_(0),
+      blockSpacing_(1) {
     setMouseTracking(true);
+    setMinimumSize(600, 400);
 }
 
 void BlockMapWidget::setFileSystem(FileSystem* fs) {
@@ -53,61 +52,59 @@ void BlockMapWidget::paintEvent(QPaintEvent *event) {
         return;
     }
     
-    int cellSize = blockDisplaySize_ + blockSpacing_;
-    blocksPerRow_ = std::max(1, width() / cellSize);
+    int blockSize = blockDisplaySize_;
+    int spacing = blockSpacing_;
+    blocksPerRow_ = std::max(1, width() / (blockSize + spacing));
     
-    int blockCols = blocksPerRow_; // Renamed for clarity, same as blocksPerRow_
-    int blockSize = blockDisplaySize_; // Renamed for clarity, same as blockDisplaySize_
-    int gap = blockSpacing_; // Renamed for clarity, same as blockSpacing_
-    
-    uint32_t totalBlocks = blockStates_.size(); // Use actual size for iteration limit
-    uint32_t blockNum = 0; // Initialize block number for the loop
-    
-    for (size_t row = 0; ; ++row) { // Loop through rows
-        if (row * cellSize > height()) break; // Stop if row is out of bounds
+    for (size_t i = 0; i < blockStates_.size(); ++i) {
+        int row = i / blocksPerRow_;
+        int col = i % blocksPerRow_;
         
-        for (int col = 0; col < blockCols && blockNum < totalBlocks; ++col, ++blockNum) {
-            int x = col * (blockSize + gap);
-            int y = row * (blockSize + gap);
-            
-            BlockState state = blockStates_[blockNum]; // Use blockStates_ directly
-            QColor color = getBlockColor(state);
-            
-            // All USED blocks (files) are red - no per-file colors
-            // This makes fragmentation more visible
-            
-            if (blockNum == hoveredBlock_) { // Use blockNum for hovered check
-                color = color.lighter(150);
-            }
-            
-            painter.setBrush(color);
-            painter.setPen(QPen(color.darker(120), 1));
+        int x = col * (blockSize + spacing);
+        int y = row * (blockSize + spacing);
+        
+        QColor color = getFileColor(i);
+        painter.fillRect(x, y, blockSize, blockSize, color);
+        
+        // Highlight hovered block
+        if (i == hoveredBlock_) {
+            painter.setPen(QPen(Qt::yellow, 2));
             painter.drawRect(x, y, blockSize, blockSize);
         }
-        if (blockNum >= totalBlocks) break; // Stop if all blocks are drawn
     }
 }
 
 void BlockMapWidget::mouseMoveEvent(QMouseEvent *event) {
-    if (blockStates_.empty()) return;
+    if (blockStates_.empty()) {
+        return;
+    }
     
-    int cellSize = blockDisplaySize_ + blockSpacing_;
-    int col = event->pos().x() / cellSize;
-    int row = event->pos().y() / cellSize;
+    QPoint pos = event->pos();
+    int blockSize = blockDisplaySize_;
+    int spacing = 1;
     
-    uint32_t blockNum = row * blocksPerRow_ + col;
-    
-    if (blockNum < blockStates_.size()) {
-        if (hoveredBlock_ != blockNum) {
+    if (blocksPerRow_ > 0) {
+        int col = pos.x() / (blockSize + spacing);
+        int row = pos.y() / (blockSize + spacing);
+        uint32_t blockNum = row * blocksPerRow_ + col;
+        
+        if (blockNum < blockStates_.size()) {
             hoveredBlock_ = blockNum;
-            update();
             
+            // Build tooltip with block info
             BlockState state = blockStates_[blockNum];
-            QString tooltip = QString("Block %1: %2")
-                            .arg(blockNum)
-                            .arg(getBlockStateText(state));
+            QString stateStr;
+            switch (state) {
+                case BlockState::FREE: stateStr = "Free"; break;
+                case BlockState::USED: stateStr = "Used"; break;
+                case BlockState::SUPERBLOCK: stateStr = "Superblock"; break;
+                case BlockState::INODE_TABLE: stateStr = "Inode Table"; break;
+                default: stateStr = "Unknown"; break;
+            }
             
-            // For USED blocks, add inode and filename info
+            QString tooltip = QString("Block: %1 | State: %2").arg(blockNum).arg(stateStr);
+            
+            // If block is used, try to find owner and filename
             if (state == BlockState::USED && fileSystem_) {
                 uint32_t inodeNum = fileSystem_->getBlockOwner(blockNum);
                 if (inodeNum != UINT32_MAX) {
@@ -127,6 +124,7 @@ void BlockMapWidget::mouseMoveEvent(QMouseEvent *event) {
             QToolTip::showText(event->globalPosition().toPoint(), tooltip);
             
             emit blockHovered(blockNum, state);
+            update();
         }
     } else {
         hoveredBlock_ = UINT32_MAX;
@@ -150,44 +148,40 @@ void BlockMapWidget::updateBlockStates() {
     blockStates_.clear();
     blockStates_.reserve(totalBlocks_);
     
-    // Query in-memory bitmap state (isBlockFree checks bitmap_ directly)
-    // This shows current state, not stale disk state
+    // Query block states - only query valid blocks
     for (uint32_t i = 0; i < totalBlocks_; ++i) {
         blockStates_.push_back(getBlockState(i));
     }
 }
 
 BlockState BlockMapWidget::getBlockState(uint32_t blockNum) {
-    if (!fileSystem_) return BlockState::FREE;
+    if (!fileSystem_ || blockNum >= totalBlocks_) {
+        return BlockState::FREE;  // Default to FREE for invalid blocks
+    }
     
     const auto& sb = fileSystem_->getDisk()->getSuperblock();
     
-    // Superblock
+    // Superblock (block 0)
     if (blockNum == 0) {
         return BlockState::SUPERBLOCK;
     }
     
-    // Bitmap
+    // Bitmap blocks
     if (blockNum >= sb.bitmapStart && blockNum < sb.inodeTableStart) {
+        return BlockState::INODE_TABLE;  // Using INODE_TABLE color for bitmap
+    }
+    
+    // Inode table blocks
+    if (blockNum >= sb.inodeTableStart && blockNum < sb.dataBlocksStart) {
         return BlockState::INODE_TABLE;
     }
     
-    // Inode table
-    if (blockNum >= sb.inodeTableStart && blockNum < sb.journalStart) {
-        return BlockState::INODE_TABLE;
-    }
-    
-    // Journal
-    if (blockNum >= sb.journalStart && blockNum < sb.dataBlocksStart) {
-        return BlockState::JOURNAL;
-    }
-    
-    // Data blocks
+    // Data blocks - check if free or used
     if (fileSystem_->getDisk()->isBlockFree(blockNum)) {
         return BlockState::FREE;
-    } else {
-        return BlockState::USED;
     }
+    
+    return BlockState::USED;
 }
 
 QColor BlockMapWidget::getBlockColor(BlockState state) {
@@ -199,29 +193,26 @@ QColor BlockMapWidget::getBlockColor(BlockState state) {
             // This will be set from updateBlockStates
             return QColor(231, 76, 60);  // Red (fallback)
         case BlockState::CORRUPTED:
-            return QColor(241, 196, 15); // Yellow
+            return QColor(30, 30, 30);   // BLACK - corrupted blocks
         case BlockState::JOURNAL:
             return QColor(52, 152, 219); // Blue
         case BlockState::INODE_TABLE:
             return QColor(155, 89, 182); // Purple
         case BlockState::SUPERBLOCK:
-            return QColor(26, 188, 156); // Teal
+            return QColor(241, 196, 15); // Yellow
         default:
-            return QColor(127, 127, 127); // Gray
+            return QColor(100, 100, 100); // Gray
     }
 }
 
-QColor BlockMapWidget::getFileColor(uint32_t inodeNum) {
-    // Generate unique red shade from inode number
-    // Use HSL color space for consistent red hues with varying saturation/lightness
-    int hue = 0; // Red base (0 degrees in HSL)
+QColor BlockMapWidget::getFileColor(uint32_t blockNum) {
+    if (blockNum >= blockStates_.size()) {
+        return Qt::gray;
+    }
     
-    // Vary saturation and lightness based on inode number
-    // This creates visually distinct red shades
-    int saturation = 150 + (inodeNum * 37) % 100;  // Range: 150-250
-    int lightness = 80 + (inodeNum * 53) % 60;     // Range: 80-140
-    
-    return QColor::fromHsl(hue, saturation, lightness);
+    // Use the block state to determine color
+    BlockState state = blockStates_[blockNum];
+    return getBlockColor(state);
 }
 
 QString BlockMapWidget::getBlockStateText(BlockState state) {
@@ -229,9 +220,9 @@ QString BlockMapWidget::getBlockStateText(BlockState state) {
         case BlockState::FREE: return "Free";
         case BlockState::USED: return "Used";
         case BlockState::CORRUPTED: return "Corrupted";
-        case BlockState::JOURNAL: return "Journal";
-        case BlockState::INODE_TABLE: return "Inode Table";
         case BlockState::SUPERBLOCK: return "Superblock";
+        case BlockState::INODE_TABLE: return "Inode Table";
+        case BlockState::JOURNAL: return "Journal";
         default: return "Unknown";
     }
 }

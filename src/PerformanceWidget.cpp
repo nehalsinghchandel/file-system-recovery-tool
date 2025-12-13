@@ -94,20 +94,18 @@ void PerformanceWidget::updateMetrics() {
                            .arg(stats.totalReads)
                            .arg(stats.totalWrites));
     
+    // Get REAL fragmentation score from FileSystem
+    double fragScore = fileSystem_->getFragmentationScore();
+    fragmentationLabel_->setText(QString("Fragmentation: %1%").arg(fragScore, 0, 'f', 1));
+    
     // Record chart data if we have new operations
     if (avgRead > 0 && (readLatencies_.empty() || readLatencies_.back() != avgRead)) {
         readLatencies_.push_back(avgRead);
         timestamps_.push_back(QDateTime::currentMSecsSinceEpoch());
         
         if (readLatencies_.size() > MAX_DATA_POINTS) {
-            readLatencies_.pop_front();
-            timestamps_.pop_front();
-        }
-        
-        // Update read chart
-        readLatencySeries_->clear();
-        for (size_t i = 0; i < readLatencies_.size(); ++i) {
-            readLatencySeries_->append(i, readLatencies_[i]);
+            readLatencies_.erase(readLatencies_.begin());
+            timestamps_.erase(timestamps_.begin());
         }
     }
     
@@ -115,17 +113,9 @@ void PerformanceWidget::updateMetrics() {
         writeLatencies_.push_back(avgWrite);
         
         if (writeLatencies_.size() > MAX_DATA_POINTS) {
-            writeLatencies_.pop_front();
-        }
-        
-        // Update write chart
-        writeLatencySeries_->clear();
-        for (size_t i = 0; i < writeLatencies_.size(); ++i) {
-            writeLatencySeries_->append(i, writeLatencies_[i]);
+            writeLatencies_.erase(writeLatencies_.begin());
         }
     }
-    
-    updateFragmentationStats();
 }
 
 void PerformanceWidget::recordReadOperation(double latencyMs) {

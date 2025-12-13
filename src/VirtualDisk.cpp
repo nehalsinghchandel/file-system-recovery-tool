@@ -179,19 +179,18 @@ int32_t VirtualDisk::allocateBlock() {
 }
 
 int32_t VirtualDisk::allocateBlockCompact() {
-    // Allocate from LOWEST free block (creates contiguous layout for defrag)
-    // This is slower but produces compact allocation
+    // Allocate from LOWEST available block (left-to-right compaction)
+    // Start searching from data blocks area
     for (uint32_t i = superblock_.dataBlocksStart; i < superblock_.totalBlocks; ++i) {
-        if (bitmap_[i]) {  // Block is free
-            bitmap_[i] = false;  // Mark as used
+        if (bitmap_[i]) {  // bitmap_[i] == true means FREE
+            bitmap_[i] = false;  // Mark as allocated
             superblock_.freeBlocks--;
-            writeBitmap();  // Keep disk in sync (same as regular allocateBlock)
             return static_cast<int32_t>(i);
         }
     }
     
-    std::cerr << "No free blocks available" << std::endl;
-    return -1;  // No free blocks
+    std::cerr << "No free blocks available for compact allocation" << std::endl;
+    return -1;
 }
 
 bool VirtualDisk::freeBlock(uint32_t blockNum) {

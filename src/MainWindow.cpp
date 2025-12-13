@@ -541,16 +541,24 @@ void MainWindow::connectSignals() {
         progressBar_->setMaximum(100);
         
         // Run defragmentation
+        bool cancelled = false;
         controlPanel_->runDefrag();
         
-        // Rebuild ownership and refresh everything
+        // CRITICAL: Rebuild ownership map from new block locations
         fileSystem_->rebuildBlockOwnership();
+        
+        // Force complete refresh of ALL widgets
+        blockMapWidget_->setFileSystem(fileSystem_.get());
         blockMapWidget_->refresh();
+        
+        fileBrowserWidget_->setFileSystem(fileSystem_.get());
         fileBrowserWidget_->refresh();
+        
+        performanceWidget_->setFileSystem(fileSystem_.get());
         performanceWidget_->updateMetrics();
         
         progressBar_->setValue(100);
-        logOutput_->append("[SUCCESS] Defragmentation complete");
+        logOutput_->append("[SUCCESS] Defragmentation complete - check bitmap and file fragments");
         
         QThread::msleep(500);
         progressBar_->setVisible(false);
@@ -562,9 +570,15 @@ void MainWindow::connectSignals() {
 void MainWindow::onNewDisk() {
     std::cout << "onNewDisk() called" << std::endl;
     
-    QString diskPath = QFileDialog::getSaveFileName(this, "Create New Disk", 
-                                                     QDir::homePath() + "/File System Data/disk.bin",
-                                                     "Disk Files (*.bin)");
+    // Use Qt dialog instead of macOS native to avoidpermissions issues
+    QString diskPath = QFileDialog::getSaveFileName(
+        this, 
+        "Create New Disk", 
+        QDir::homePath() + "/disk.bin",
+        "Disk Files (*.bin)",
+        nullptr,
+        QFileDialog::DontUseNativeDialog  // Avoid macOS permissions issues
+    );
     
     std::cout << "Selected file: " << diskPath.toStdString() << std::endl;
     
@@ -606,10 +620,16 @@ void MainWindow::onNewDisk() {
     logOutput_->append("[SUCCESS] Created new disk");
 }
 
-void MainWindow::onMountDisk() {
-    QString diskPath = QFileDialog::getOpenFileName(this, "Mount Existing Disk",
-                                                     QDir::homePath(),
-                                                     "Disk Files (*.bin)");
+void MainWindow::onOpenDisk() {
+    // Use Qt dialog instead of macOS native
+    QString diskPath = QFileDialog::getOpenFileName(
+        this, 
+        "Mount Existing Disk",
+        QDir::homePath(),
+        "Disk Files (*.bin)",
+        nullptr,
+        QFileDialog::DontUseNativeDialog  // Avoid macOS permissions issues
+    );
     
     if (diskPath.isEmpty()) return;
     
@@ -633,8 +653,8 @@ void MainWindow::onMountDisk() {
     controlPanel_->setRecoveryManager(recoveryMgr_.get());
     controlPanel_->setDefragManager(defragMgr_.get());
     
-    // Rebuild ownership for existing disk
-    fileSystem_->rebuildBlockOwnership();
+    // DON'T rebuild ownership automatically - it will rebuild on demand when files are accessed
+    // This prevents crashes from reading uninitialized blocks
     
     // Refresh all widgets
     updateAllWidgets();

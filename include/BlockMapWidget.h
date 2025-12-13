@@ -2,9 +2,10 @@
 #define BLOCKMAPWIDGET_H
 
 #include <QWidget>
-#include <QScrollArea>
+#include <QPainter>
+#include <QMouseEvent>
 #include <vector>
-#include <cstdint>
+#include "FileSystem.h"
 
 namespace FileSystemTool {
 
@@ -13,10 +14,10 @@ class FileSystem;
 enum class BlockState {
     FREE,
     USED,
-    CORRUPTED,
-    JOURNAL,
+    CORRUPTED,      // For power cut simulation
+    SUPERBLOCK,
     INODE_TABLE,
-    SUPERBLOCK
+    JOURNAL
 };
 
 class BlockMapWidget : public QWidget {
@@ -31,21 +32,21 @@ public:
     
     QSize sizeHint() const override;
 
+signals:
+    void blockSelected(uint32_t blockNum, BlockState state);
+    void blockHovered(uint32_t blockNum, BlockState state);
+
 protected:
     void paintEvent(QPaintEvent *event) override;
     void mouseMoveEvent(QMouseEvent *event) override;
     void mousePressEvent(QMouseEvent *event) override;
     void resizeEvent(QResizeEvent *event) override;
 
-signals:
-    void blockSelected(uint32_t blockNum, BlockState state);
-    void blockHovered(uint32_t blockNum, BlockState state);
-
 private:
+    QColor getBlockColor(BlockState state);
+    QColor getFileColor(uint32_t blockNum);
     void updateBlockStates();
     BlockState getBlockState(uint32_t blockNum);
-    QColor getBlockColor(BlockState state);
-    QColor getFileColor(uint32_t inodeNum);  // Generate unique color per file
     QString getBlockStateText(BlockState state);
     int getBlockSize() const;
     
@@ -53,11 +54,9 @@ private:
     std::vector<BlockState> blockStates_;
     uint32_t totalBlocks_;
     uint32_t hoveredBlock_;
-    double zoomLevel_;
-    
-    // Layout
-    int blocksPerRow_;
     int blockDisplaySize_;
+    double zoomLevel_;
+    int blocksPerRow_;  // Store calculated blocks per row for hover
     int blockSpacing_;
 };
 

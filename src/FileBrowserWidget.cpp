@@ -110,25 +110,54 @@ void FileBrowserWidget::loadDirectory(const QString& path) {
     populateTable(entries);
 }
 
-uint32_t FileBrowserWidget::calculateFragments(const DirectoryEntry& entry) {
-    if (!fileSystem_ || entry.fileType != static_cast<uint8_t>(FileType::REGULAR_FILE)) {
-        return 0; // Only calculate for regular files
-    }
-
+uint32_t FileBrowserWidget::calculateFragments(const std::string& path) {
+    if (!fileSystem_) return 0;
+    
+    // Get inode for the file
     Inode inode;
-    if (fileSystem_->getInodeManager()->readInode(entry.inodeNumber, inode)) {
-        auto blocks = fileSystem_->getInodeManager()->getInodeBlocks(inode);
-        if (blocks.empty()) return 0;
-
-        uint32_t fragments = 1;
-        for (size_t j = 1; j < blocks.size(); ++j) {
-            if (blocks[j] != blocks[j-1] + 1) {
-                fragments++;
-            }
-        }
-        return fragments;
+    if (!fileSystem_->getFileInfo(path, inode)) {
+        return 0;
     }
-    return 0;
+    
+    if (inode.fileSize == 0) return 0;
+    
+    // Collect all ALLOCATED block numbers (skip -1 and 0)
+    std::vector<uint32_t> blocks;
+    
+    const auto& sb = fileSystem_->getDisk()->getSuperblock();
+    
+    // Add direct blocks - ONLY if they're valid (not -1, not 0, within range)
+    for (int i = 0; i < 12; ++i) {
+        if (inode.directBlocks[i] > 0 &&
+            inode.directBlocks[i] != -1 &&
+            inode.directBlocks[i] < (int32_t)sb.totalBlocks) {
+            blocks.push_back(static_cast<uint32_t>(inode.directBlocks[i]));
+        }
+    }
+    
+    // Add indirect blocks if valid
+    if (inode.indirectBlock > 0 &&
+        inode.indirectBlock != -1 &&
+        inode.indirectBlock < (int32_t)sb.totalBlocks) {
+        // Would need to read indirect block here for complete accuracy
+        // For now, we'll just use direct blocks
+    }
+    
+    if (blocks.empty()) return 0;
+    if (blocks.size() == 1) return 1;  // Single block = 1 fragment (perfect)
+    
+    // Sort blocks to find contiguous sequences
+    std::sort(blocks.begin(), blocks.end());
+    
+    // Count fragments (number of non-contiguous sequences)
+    int fragments = 1;  // Start with 1 fragment
+    for (size_t i = 1; i < blocks.size(); ++i) {
+        if (blocks[i] != blocks[i-1] + 1) {
+            fragments++;  // Non-contiguous = new fragment
+        }
+    }
+    
+    return fragments;
 }
 
 void FileBrowserWidget::populateTable(const std::vector<DirectoryEntry>& entries) {
@@ -155,23 +184,20 @@ void FileBrowserWidget::populateTable(const std::vector<DirectoryEntry>& entries
             QTableWidgetItem* sizeItem = new QTableWidgetItem(
                 QString::number(inode.fileSize));
             fileTable_->setItem(i, COL_SIZE, sizeItem);
-            
-            // Fragments (only for files)
-            if (inode.fileType == FileType::REGULAR_FILE) {
-                auto blocks = fileSystem_->getInodeManager()->getInodeBlocks(inode);
-                int fragments = 1;
-                for (size_t j = 1; j < blocks.size(); ++j) {
-                    if (blocks[j] != blocks[j-1] + 1) {
-                        fragments++;
-                    }
-                }
-                QTableWidgetItem* fragItem = new QTableWidgetItem(QString::number(fragments));
-                fileTable_->setItem(i, COL_FRAGMENTS, fragItem);
-            } else {
-                QTableWidgetItem* fragItem = new QTableWidgetItem("N/A");
-                fileTable_->setItem(i, COL_FRAGMENTS, fragItem);
-            }
         }
+        
+        // Fragments - calculate for files
+        QString fragStr = "-";
+        if (entry.fileType == static_cast<uint8_t>(FileType::REGULAR_FILE)) {
+            std::string fullPath = currentPath_.toStdString();
+            if (!fullPath.empty() && fullPath.back() != '/') fullPath += "/";
+            fullPath += entry.getName();
+            
+            uint32_t frags = calculateFragments(fullPath);
+            fragStr = QString::number(frags);
+        }
+        QTableWidgetItem* fragItem = new QTableWidgetItem(fragStr);
+        fileTable_->setItem(i, COL_FRAGMENTS, fragItem);
         
         // Inode
         QTableWidgetItem* inodeItem = new QTableWidgetItem(

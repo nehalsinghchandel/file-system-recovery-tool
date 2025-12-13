@@ -146,17 +146,36 @@ bool InodeManager::addBlockToInode(Inode& inode, uint32_t blockNum) {
 
 std::vector<uint32_t> InodeManager::getInodeBlocks(const Inode& inode) {
     std::vector<uint32_t> blocks;
+    const auto& sb = disk_->getSuperblock();
     
-    // Add direct blocks
-    for (uint32_t i = 0; i < DIRECT_BLOCKS && inode.directBlocks[i] != 0; ++i) {
-        blocks.push_back(inode.directBlocks[i]);
+    // CRITICAL FIX: Only add VALID direct blocks (skip -1, 0, out of range)
+    for (int i = 0; i < 12; ++i) {
+        if (inode.directBlocks[i] > 0 &&
+            inode.directBlocks[i] != -1 &&
+            inode.directBlocks[i] < (int32_t)sb.totalBlocks) {
+            blocks.push_back(static_cast<uint32_t>(inode.directBlocks[i]));
+        }
     }
     
-    // Add indirect blocks
-    if (inode.indirectBlock != 0) {
-        std::vector<uint32_t> indirectPointers;
-        readIndirectBlock(inode.indirectBlock, indirectPointers);
-        blocks.insert(blocks.end(), indirectPointers.begin(), indirectPointers.end());
+    // Handle indirect block if valid
+    if (inode.indirectBlock > 0 &&
+        inode.indirectBlock != -1 &&
+        inode.indirectBlock < (int32_t)sb.totalBlocks) {
+        
+        std::vector<uint8_t> indirectData(BLOCK_SIZE);
+        if (disk_->readBlock(inode.indirectBlock, indirectData.data())) {
+            const int32_t* pointers = reinterpret_cast<const int32_t*>(indirectData.data());
+            int maxIndirect = BLOCK_SIZE / sizeof(int32_t);
+            
+            for (int i = 0; i < maxIndirect; ++i) {
+                // CRITICAL: Skip invalid indirect pointers
+                if (pointers[i] > 0 &&
+                    pointers[i] != -1 &&
+                    pointers[i] < (int32_t)sb.totalBlocks) {
+                    blocks.push_back(static_cast<uint32_t>(pointers[i]));
+                }
+            }
+        }
     }
     
     return blocks;

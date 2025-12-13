@@ -66,13 +66,28 @@ bool DefragManager::isFileFragmented(uint32_t inodeNum) {
 }
 
 uint32_t DefragManager::countFileFragments(const Inode& inode) {
-    auto blocks = fs_->getInodeManager()->getInodeBlocks(inode);
+    const auto& sb = fs_->getDisk()->getSuperblock();
+    std::vector<uint32_t> blocks;
+    
+    // Collect VALID direct blocks only (skip -1, 0, out of range)
+    for (int i = 0; i < 12; ++i) {
+        if (inode.directBlocks[i] > 0 &&
+            inode.directBlocks[i] != -1 &&
+            inode.directBlocks[i] < (int32_t)sb.totalBlocks) {
+            blocks.push_back(static_cast<uint32_t>(inode.directBlocks[i]));
+        }
+    }
+    
+    // TODO: Add indirect blocks if needed (with validation)
     
     if (blocks.size() <= 1) {
         return blocks.size();
     }
     
-    // Count how many times blocks are non-contiguous
+    // Sort to find contiguous sequences
+    std::sort(blocks.begin(), blocks.end());
+    
+    // Count fragments (non-contiguous sequences)
     uint32_t fragments = 1;
     for (size_t i = 1; i < blocks.size(); ++i) {
         if (blocks[i] != blocks[i-1] + 1) {
@@ -90,46 +105,123 @@ bool DefragManager::defragmentFileSystem(bool& cancelled) {
     beforeBenchmark_ = runBenchmark(50);
     
     const auto& sb = fs_->getDisk()->getSuperblock();
-    uint32_t filesProcessed = 0;
-    uint32_t filesDefragged = 0;
     
-    // Process each file
+    // STEP 1: Collect ALL files and their data
+    struct FileData {
+        uint32_t inodeNum;
+        Inode inode;
+        std::vector<uint8_t> data;
+        std::vector<uint32_t> oldBlocks;
+    };
+    
+    std::vector<FileData> allFiles;
+    
     for (uint32_t i = 0; i < sb.inodeCount && !cancelled; ++i) {
         Inode inode;
         if (!fs_->getInodeManager()->readInode(i, inode)) {
             continue;
         }
         
-        if (inode.isValid() && inode.fileType == FileType::REGULAR_FILE) {
-            filesProcessed++;
+        if (inode.isValid() && inode.fileType == FileType::REGULAR_FILE && inode.fileSize > 0) {
+            FileData fd;
+            fd.inodeNum = i;
+            fd.inode = inode;
+            fd.data.resize(inode.fileSize);
             
-            if (isFileFragmented(i)) {
-                if (defragmentFile(i)) {
-                    filesDefragged++;
+            // Collect old blocks
+            for (int j = 0; j < 12; ++j) {
+                if (inode.directBlocks[j] > 0 &&
+                    inode.directBlocks[j] != -1 &&
+                    inode.directBlocks[j] < (int32_t)sb.totalBlocks) {
+                    fd.oldBlocks.push_back(static_cast<uint32_t>(inode.directBlocks[j]));
                 }
             }
             
-            // Report progress
-            int progress = (filesProcessed * 100) / sb.inodeCount;
-            reportProgress(progress, "Defragmenting files...");
+            // Read file data from old blocks
+            size_t bytesRead = 0;
+            for (uint32_t blockNum : fd.oldBlocks) {
+                std::vector<uint8_t> blockData(BLOCK_SIZE);
+                if (fs_->getDisk()->readBlock(blockNum, blockData.data())) {
+                    size_t bytesToCopy = std::min((size_t)BLOCK_SIZE, fd.data.size() - bytesRead);
+                    std::copy(blockData.begin(), blockData.begin() + bytesToCopy,
+                             fd.data.begin() + bytesRead);
+                    bytesRead += bytesToCopy;
+                }
+            }
+            
+            allFiles.push_back(fd);
         }
     }
     
-    // CRITICAL: Write bitmap and superblock to disk to persist changes
+    // STEP 2: FREE ALL old blocks
+    for (auto& fd : allFiles) {
+        for (uint32_t blockNum : fd.oldBlocks) {
+            fs_->getDisk()->freeBlock(blockNum);
+            fs_->clearBlockOwner(blockNum);
+        }
+        
+        // Clear inode blocks
+        for (int i = 0; i < 12; ++i) {
+            fd.inode.directBlocks[i] = -1;
+        }
+        fd.inode.indirectBlock = -1;
+        fd.inode.blockCount = 0;
+    }
+    
+    // STEP 3: Reallocate ALL files from scratch (guarantees contiguous allocation)
+    uint32_t filesDefragged = 0;
+    for (auto& fd : allFiles) {
+        uint32_t blocksNeeded = (fd.data.size() + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        std::vector<uint32_t> newBlocks;
+        
+        // Allocate blocks - should be contiguous since we freed everything
+        for (uint32_t i = 0; i < blocksNeeded; ++i) {
+            int32_t blockNum = fs_->getDisk()->allocateBlockCompact();
+            if (blockNum < 0) {
+                std::cerr << "ERROR: Failed to allocate block during defrag!" << std::endl;
+                break;
+            }
+            newBlocks.push_back(static_cast<uint32_t>(blockNum));
+            fs_->setBlockOwner(static_cast<uint32_t>(blockNum), fd.inodeNum);
+        }
+        
+        // Write data to new blocks
+        for (size_t i = 0; i < newBlocks.size(); ++i) {
+            size_t offset = i * BLOCK_SIZE;
+            size_t copySize = std::min((size_t)BLOCK_SIZE, fd.data.size() - offset);
+            
+            std::vector<uint8_t> blockBuffer(BLOCK_SIZE, 0);
+            std::copy(fd.data.begin() + offset, fd.data.begin() + offset + copySize, blockBuffer.begin());
+            
+            fs_->getDisk()->writeBlock(newBlocks[i], blockBuffer.data());
+        }
+        
+        // Update inode
+        for (size_t i = 0; i < newBlocks.size() && i < 12; ++i) {
+            fd.inode.directBlocks[i] = newBlocks[i];
+            fd.inode.blockCount++;
+        }
+        
+        fs_->getInodeManager()->writeInode(fd.inodeNum, fd.inode);
+        filesDefragged++;
+        
+        std::cout << "Defragmented file inode " << fd.inodeNum 
+                  << " (" << newBlocks.size() << " blocks)" << std::endl;
+    }
+    
+    // STEP 4: Write changes to disk
     fs_->getDisk()->writeBitmap();
     fs_->getDisk()->writeSuperblock();
     
     // Run benchmark after
-    if (!cancelled) {
-        afterBenchmark_ = runBenchmark(50);
-        
-        std::cout << "Defragmentation complete!" << std::endl;
-        std::cout << "Files defragmented: " << filesDefragged << std::endl;
-        std::cout << "Read latency improvement: " 
-                  << (beforeBenchmark_.avgReadTimeMs - afterBenchmark_.avgReadTimeMs) << " ms" << std::endl;
-    }
+    afterBenchmark_ = runBenchmark(50);
     
-    return !cancelled;
+    std::cout << "Defragmentation complete!" << std::endl;
+    std::cout << "Files defragmented: " << filesDefragged << std::endl;
+    std::cout << "Read latency improvement: " 
+              << (beforeBenchmark_.avgReadTimeMs - afterBenchmark_.avgReadTimeMs) << " ms" << std::endl;
+    
+    return true;
 }
 
 bool DefragManager::defragmentFile(uint32_t inodeNum) {
@@ -138,51 +230,72 @@ bool DefragManager::defragmentFile(uint32_t inodeNum) {
         return false;
     }
     
-    if (inode.blockCount == 0) {
-        return true;
-    }
+    // Read file data first
+    std::vector<uint8_t> fileData(inode.fileSize);
+    const auto& sb = fs_->getDisk()->getSuperblock();
     
-    // Read file data
-    auto blocks = fs_->getInodeManager()->getInodeBlocks(inode);
-    std::vector<uint8_t> fileData;
-    std::vector<uint8_t> blockBuffer(BLOCK_SIZE);
-    
-    for (uint32_t blockNum : blocks) {
-        if (!fs_->getDisk()->readBlock(blockNum, blockBuffer.data())) {
-            return false;
+    // Collect valid blocks and read data
+    std::vector<uint32_t> oldBlocks;
+    for (int i = 0; i < 12; ++i) {
+        if (inode.directBlocks[i] > 0 &&
+            inode.directBlocks[i] != -1 &&
+            inode.directBlocks[i] < (int32_t)sb.totalBlocks) {
+            oldBlocks.push_back(static_cast<uint32_t>(inode.directBlocks[i]));
         }
-        
-        size_t bytesToCopy = std::min(static_cast<size_t>(BLOCK_SIZE), 
-                                      static_cast<size_t>(inode.fileSize - fileData.size()));
-        fileData.insert(fileData.end(), blockBuffer.begin(), blockBuffer.begin() + bytesToCopy);
     }
     
-    // Free old blocks FIRST - this creates free space at their locations
-    for (uint32_t blockNum : blocks) {
+    // Read  file data from old blocks
+    size_t bytesRead = 0;
+    for (uint32_t blockNum : oldBlocks) {
+        std::vector<uint8_t> blockData(BLOCK_SIZE);
+        if (fs_->getDisk()->readBlock(blockNum, blockData.data())) {
+            size_t bytesToCopy = std::min((size_t)BLOCK_SIZE, fileData.size() - bytesRead);
+            std::copy(blockData.begin(), blockData.begin() + bytesToCopy,
+                     fileData.begin() + bytesRead);
+            bytesRead += bytesToCopy;
+        }
+    }
+    
+    // Free old blocks
+    for (uint32_t blockNum : oldBlocks) {
         fs_->getDisk()->freeBlock(blockNum);
+        fs_->clearBlockOwner(blockNum);
     }
     
-    // Reset inode
-    memset(inode.directBlocks, 0, sizeof(inode.directBlocks));
-    inode.indirectBlock = 0;
+    // Clear inode blocks
+    for (int i = 0; i < 12; ++i) {
+        inode.directBlocks[i] = -1;
+    }
+    inode.indirectBlock = -1;
+
     inode.blockCount = 0;
     
-    // Allocate new blocks using COMPACT allocation (from lowest available)
-    // This ensures all files get sequential blocks
+    // Allocate new CONTIGUOUS blocks starting from lowest available
     std::vector<uint32_t> newBlocks;
-    for (uint32_t i = 0; i < blocks.size(); ++i) {
+    uint32_t blocksNeeded = oldBlocks.size();
+    
+    for (uint32_t i = 0; i < blocksNeeded; ++i) {
         int32_t blockNum = fs_->getDisk()->allocateBlockCompact();
         if (blockNum < 0) {
-            // Allocation failed - restore old blocks
-            for (uint32_t oldBlock : blocks) {
-                fs_->getDisk()->allocateBlock();  // Re-allocate to mark as used
-            }
+            // Allocation failed - skip this file
             return false;
         }
         newBlocks.push_back(static_cast<uint32_t>(blockNum));
+        fs_->setBlockOwner(static_cast<uint32_t>(blockNum), inodeNum);
+    }
+    
+    // VERIFY blocks are contiguous
+    bool isContiguous = true;
+    for (size_t i = 1; i < newBlocks.size(); ++i) {
+        if (newBlocks[i] != newBlocks[i-1] + 1) {
+            isContiguous = false;
+            std::cerr << "WARNING: Allocated blocks not contiguous for inode " << inodeNum << std::endl;
+            break;
+        }
     }
     
     // Write data to new sequential blocks
+    std::vector<uint8_t> blockBuffer(BLOCK_SIZE);
     for (size_t i = 0; i < newBlocks.size(); ++i) {
         size_t offset = i * BLOCK_SIZE;
         size_t copySize = std::min(static_cast<size_t>(BLOCK_SIZE), fileData.size() - offset);
@@ -193,11 +306,21 @@ bool DefragManager::defragmentFile(uint32_t inodeNum) {
         if (!fs_->getDisk()->writeBlock(newBlocks[i], blockBuffer.data())) {
             return false;
         }
-        
-        fs_->getInodeManager()->addBlockToInode(inode, newBlocks[i]);
     }
     
-    // Update inode
+    // Update inode with new CONTIGUOUS blocks
+    for (size_t i = 0; i < newBlocks.size() && i < 12; ++i) {
+        inode.directBlocks[i] = newBlocks[i];
+        inode.blockCount++;
+    }
+    
+    // Handle indirect blocks if file is large (>12 blocks)
+    if (newBlocks.size() > 12) {
+        // TODO: Handle indirect blocks
+        std::cerr << "WARNING: File larger than 12 blocks not fully supported in defrag" << std::endl;
+    }
+    
+    // Write updated inode
     return fs_->getInodeManager()->writeInode(inodeNum, inode);
 }
 

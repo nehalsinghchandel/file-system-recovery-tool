@@ -5,9 +5,14 @@
 
 namespace FileSystemTool {
 
-FileSystem::FileSystem(const std::string& diskPath)
-    : diskPath_(diskPath), mounted_(false) {
-    memset(&stats_, 0, sizeof(PerformanceStats));
+FileSystem::FileSystem(VirtualDisk* disk) 
+    : disk_(disk), inodeMgr_(nullptr), rootDir_(nullptr), 
+      mounted_(false), hasCorruption_(false), activeWriteInodeNum_(UINT32_MAX) {
+    
+    if (disk_) {
+        inodeMgr_ = new InodeManager(disk_);
+        rootDir_ = new Directory(inodeMgr_, disk_);
+    }
 }
 
 FileSystem::~FileSystem() {
@@ -66,6 +71,8 @@ bool FileSystem::mountFileSystem() {
     
     disk_->markDirty();  // Mark as mounted
     mounted_ = true;
+    
+    // DO NOT rebuild block ownership - causes crashes from uninitialized blocks
     
     std::cout << "File system mounted successfully" << std::endl;
     return true;
@@ -537,7 +544,9 @@ void FileSystem::rebuildBlockOwnership() {
         // Manually get blocks to avoid invalid block access
         // Process direct blocks
         for (int j = 0; j < 12; ++j) {
+            // CRITICAL: Skip uninitialized blocks (-1 casts to UINT32_MAX)
             if (inode.directBlocks[j] > 0 && 
+                inode.directBlocks[j] != -1 &&
                 inode.directBlocks[j] < (int32_t)sb.totalBlocks) {
                 setBlockOwner(static_cast<uint32_t>(inode.directBlocks[j]), i);
             }
@@ -545,6 +554,7 @@ void FileSystem::rebuildBlockOwnership() {
         
         // Process indirect block if valid
         if (inode.indirectBlock > 0 && 
+            inode.indirectBlock != -1 &&
             inode.indirectBlock < (int32_t)sb.totalBlocks) {
             
             std::vector<uint8_t> indirectData(BLOCK_SIZE);
@@ -553,7 +563,9 @@ void FileSystem::rebuildBlockOwnership() {
                 int maxIndirect = BLOCK_SIZE / sizeof(int32_t);
                 
                 for (int j = 0; j < maxIndirect; ++j) {
+                    // CRITICAL: Skip uninitialized blocks
                     if (pointers[j] > 0 && 
+                        pointers[j] != -1 &&
                         pointers[j] < (int32_t)sb.totalBlocks) {
                         setBlockOwner(static_cast<uint32_t>(pointers[j]), i);
                     }

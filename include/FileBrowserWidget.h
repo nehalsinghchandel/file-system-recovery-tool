@@ -53,7 +53,7 @@ private:
     void setupUI();
     void loadDirectory(const QString& path);
     void populateTable(const std::vector<DirectoryEntry>& entries);
-    uint32_t calculateFragments(const DirectoryEntry& entry);
+    uint32_t calculateFragments(const std::string& path);
     
     FileSystem* fileSystem_;
     QString currentPath_;
