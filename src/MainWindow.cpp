@@ -630,15 +630,22 @@ void MainWindow::connectSignals() {
         totalBlocksToWrite_ = blocksToWrite;  // Only write 50% before crash
         writtenBlocks_.clear();
         
-        // Create the file and get its inode
-        if (!fileSystem_->createFile(filename.toStdString())) {
-            logOutput_->append("[ERROR] Failed to create file");
-            return;
+        // DON'T create the file yet - we'll create it in the crash handler
+        // This prevents leaving a 0-byte orphan file if we crash
+        // Instead, just allocate an inode number for ownership tracking
+        
+        // Find a free inode for ownership tracking
+        int32_t inodeNum = -1;
+        for (uint32_t i = 1; i < 128; ++i) {
+            Inode testInode;
+            if (fileSystem_->getInodeManager()->readInode(i, testInode) && !testInode.isValid()) {
+                inodeNum = i;
+                break;
+            }
         }
         
-        int32_t inodeNum = fileSystem_->getDirectoryManager()->resolvePath(filename.toStdString(), 0);
         if (inodeNum < 0) {
-            logOutput_->append("[ERROR] Failed to resolve file inode");
+            logOutput_->append("[ERROR] No free inodes available");
             return;
         }
         pendingInodeNum_ = static_cast<uint32_t>(inodeNum);
@@ -948,6 +955,21 @@ void MainWindow::animatedBlockWrite() {
         int corruptedCount = writtenBlocks_.size();
         int validUsedBlocks = totalBlocks - freeBlocks - corruptedCount;
         performanceWidget_->updateHealthChart(freeBlocks, validUsedBlocks, corruptedCount);
+        
+        // Show simple crash modal
+        QMessageBox::critical(
+            this,
+            "Power Cut - System Crash",
+            QString("System crashed at 50%!\n\n"
+                    "File: %1\n"
+                    "Written: %2 blocks (50% of file)\n"
+                    "Status: %2 blocks marked as CORRUPTED\n\n"
+                    "File system state: CORRUPTED\n"
+                    "All file operations are now DISABLED.\n\n"
+                    "Action Required: Click 'Run Recovery' to restore consistency.")
+                .arg(pendingFilename_)
+                .arg(writtenBlocks_.size())
+        );
         
         // Enable ONLY recovery
         recoveryBtn_->setEnabled(true);
