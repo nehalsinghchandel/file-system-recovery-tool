@@ -5,14 +5,9 @@
 
 namespace FileSystemTool {
 
-FileSystem::FileSystem(VirtualDisk* disk) 
-    : disk_(disk), inodeMgr_(nullptr), rootDir_(nullptr), 
-      mounted_(false), hasCorruption_(false), activeWriteInodeNum_(UINT32_MAX) {
-    
-    if (disk_) {
-        inodeMgr_ = new InodeManager(disk_);
-        rootDir_ = new Directory(inodeMgr_, disk_);
-    }
+FileSystem::FileSystem(const std::string& diskPath)
+    : diskPath_(diskPath), mounted_(false), hasCorruption_(false), activeWriteInodeNum_(UINT32_MAX) {
+    memset(&stats_, 0, sizeof(PerformanceStats));
 }
 
 FileSystem::~FileSystem() {
@@ -312,8 +307,9 @@ bool FileSystem::writeFile(const std::string& path, const std::vector<uint8_t>& 
     }
     inode.indirectBlock = -1;
     
-    // Allocate and write new blocks, tracking ownership
-    if (!allocateFileBlocks(static_cast<uint32_t>(fileInode), inode, data)) {
+    //  Allocate and write new blocks, tracking ownership
+    uint32_t blocksNeeded = (data.size() + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    if (!allocateFileBlocks(inode, blocksNeeded, static_cast<uint32_t>(fileInode))) {
         return false;
     }
     
@@ -391,9 +387,8 @@ void FileSystem::resetStats() {
     memset(&stats_, 0, sizeof(PerformanceStats));
 }
 
-bool FileSystem::allocateFileBlocks(uint32_t inodeNum, Inode& inode, const std::vector<uint8_t>& data) {
-    uint32_t blocksNeeded = (data.size() + BLOCK_SIZE - 1) / BLOCK_SIZE;
-    
+
+bool FileSystem::allocateFileBlocks(Inode& inode, uint32_t blocksNeeded, uint32_t inodeNum) {
     if (blocksNeeded == 0) return true;
     
     // Allocate direct blocks
@@ -405,60 +400,38 @@ bool FileSystem::allocateFileBlocks(uint32_t inodeNum, Inode& inode, const std::
         }
         
         inode.directBlocks[i] = blockNum;
+        inode.blockCount++;
         
         // Track ownership
         setBlockOwner(static_cast<uint32_t>(blockNum), inodeNum);
-        
-        // Write data to block
-        uint32_t offset = i * BLOCK_SIZE;
-        uint32_t bytesToWrite = std::min(BLOCK_SIZE, static_cast<uint32_t>(data.size() - offset));
-        
-        std::vector<uint8_t> blockData(BLOCK_SIZE, 0);
-        std::copy(data.begin() + offset, 
-                 data.begin() + offset + bytesToWrite,
-                 blockData.begin());
-        
-        if (!disk_->writeBlock(blockNum, blockData.data())) {
-            return false;
-        }
     }
     
-    // Handle indirect blocks if needed
+    // Handle indirect blocks if needed (files > 48KB)
     if (blocksNeeded > 12) {
-        int32_t indirectBlock = disk_->allocateBlock();
-        if (indirectBlock < 0) return false;
+        // Allocate indirect block
+        int32_t indirectBlockNum = disk_->allocateBlock();
+        if (indirectBlockNum < 0) {
+            return false;
+        }
+        inode.indirectBlock = indirectBlockNum;
         
-        inode.indirectBlock = indirectBlock;
-        std::vector<int32_t> indirectPointers(BLOCK_SIZE / sizeof(int32_t), -1);
+        // Allocate data blocks referenced by indirect block
+        std::vector<uint8_t> indirectData(BLOCK_SIZE, 0);
+        int32_t* pointers = reinterpret_cast<int32_t*>(indirectData.data());
         
         uint32_t indirectBlocksNeeded = blocksNeeded - 12;
         for (uint32_t i = 0; i < indirectBlocksNeeded; ++i) {
             int32_t blockNum = disk_->allocateBlock();
-            if (blockNum < 0) return false;
-            
-            indirectPointers[i] = blockNum;
-            
-            // Track ownership
-            setBlockOwner(static_cast<uint32_t>(blockNum), inodeNum);
-            
-            // Write data
-            uint32_t offset = (12 + i) * BLOCK_SIZE;
-            uint32_t bytesToWrite = std::min(BLOCK_SIZE, static_cast<uint32_t>(data.size() - offset));
-            
-            std::vector<uint8_t> blockData(BLOCK_SIZE, 0);
-            std::copy(data.begin() + offset,
-                     data.begin() + offset + bytesToWrite,
-                     blockData.begin());
-            
-            if (!disk_->writeBlock(blockNum, blockData.data())) {
+            if (blockNum < 0) {
                 return false;
             }
+            pointers[i] = blockNum;
+            inode.blockCount++;
+            setBlockOwner(static_cast<uint32_t>(blockNum), inodeNum);
         }
         
-        if (!disk_->writeBlock(indirectBlock, 
-                              reinterpret_cast<const uint8_t*>(indirectPointers.data()))) {
-            return false;
-        }
+        // Write indirect block
+        disk_->writeBlock(indirectBlockNum, indirectData.data());
     }
     
     return true;
@@ -573,6 +546,93 @@ void FileSystem::rebuildBlockOwnership() {
             }
         }
     }
+}
+
+void FileSystem::simulatePowerCut() {
+    std::cout << "[POWER CUT] Simulating power failure!" << std::endl;
+    
+    hasCorruption_ = true;
+    corruptedBlocks_.clear();
+    
+    // Find blocks belonging to the most recently written file
+    const auto& sb = disk_->getSuperblock();
+    
+    // Find the last modified file
+    uint32_t lastModifiedInode = UINT32_MAX;
+    time_t latestTime = 0;
+    
+    for (uint32_t i = 0; i < sb.inodeCount; ++i) {
+        Inode inode;
+        if (inodeMgr_->readInode(i, inode) && inode.isValid()) {
+            if (inode.modifiedTime > latestTime) {
+                latestTime = inode.modifiedTime;
+                lastModifiedInode = i;
+            }
+        }
+    }
+    
+    if (lastModifiedInode != UINT32_MAX) {
+        Inode inode;
+        if (inodeMgr_->readInode(lastModifiedInode, inode)) {
+            // Collect blocks from this file
+            for (int i = 0; i < 12; ++i) {
+                if (inode.directBlocks[i] > 0 &&
+                    inode.directBlocks[i] != -1 &&
+                    inode.directBlocks[i] < (int32_t)sb.totalBlocks) {
+                    corruptedBlocks_.push_back(static_cast<uint32_t>(inode.directBlocks[i]));
+                }
+            }
+            
+            activeWriteInodeNum_ = lastModifiedInode;
+            
+            std::cout << "[CORRUPTION] Found " << corruptedBlocks_.size() 
+                      << " orphaned blocks from inode " << lastModifiedInode << std::endl;
+            
+            // Corrupt the inode (mark as partially invalid but keep blocks allocated)
+            inode.fileSize = 0;  // Simulate incomplete write
+            inodeMgr_->writeInode(lastModifiedInode, inode);
+        }
+    }
+}
+
+bool FileSystem::runRecovery() {
+    if (!hasCorruption_) {
+        std::cout << "[RECOVERY] No corruption detected" << std::endl;
+        return true;
+    }
+    
+    std::cout << "[RECOVERY] Starting recovery process..." << std::endl;
+    std::cout << "[RECOVERY] Found " << corruptedBlocks_.size() << " corrupted blocks" << std::endl;
+    
+    // Free all corrupted blocks
+    for (uint32_t blockNum : corruptedBlocks_) {
+        disk_->freeBlock(blockNum);
+        clearBlockOwner(blockNum);
+        std::cout << "[RECOVERY] Freed corrupted block " << blockNum << std::endl;
+    }
+    
+    // Delete the corrupted file's inode
+    if (activeWriteInodeNum_ != UINT32_MAX) {
+        Inode inode;
+        if (inodeMgr_->readInode(activeWriteInodeNum_, inode)) {
+            // Clear the inode
+            inode.reset();
+            inodeMgr_->writeInode(activeWriteInodeNum_, inode);
+            std::cout << "[RECOVERY] Cleared corrupted inode " << activeWriteInodeNum_ << std::endl;
+        }
+    }
+    
+    // Persist changes
+    disk_->writeBitmap();
+    disk_->writeSuperblock();
+    
+    // Clear corruption state
+    hasCorruption_ = false;
+    corruptedBlocks_.clear();
+    activeWriteInodeNum_ = UINT32_MAX;
+    
+    std::cout << "[RECOVERY] Recovery complete! File system is now consistent." << std::endl;
+    return true;
 }
 
 } // namespace FileSystemTool

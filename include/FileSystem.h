@@ -51,7 +51,8 @@ public:
     uint32_t getTotalBlocks() const;
     uint32_t getFreeBlocks() const;
     uint32_t getUsedBlocks() const;
-    double getFragmentationScore() const; // Changed to const
+    double getFragmentationScore();  // Not const - calculates on demand
+    std::string getFilenameFromInode(uint32_t inodeNum) const;
     
     // Block ownership tracking (for visualization)
     void setBlockOwner(uint32_t blockNum, uint32_t inodeNum);
@@ -64,6 +65,11 @@ public:
     bool hasCorruption() const { return hasCorruption_; }
     const std::vector<uint32_t>& getCorruptedBlocks() const { return corruptedBlocks_; }
     bool runRecovery();  // Fix corruption, return true if successful
+    
+    // Access to underlying components (for recovery/optimization)
+    VirtualDisk* getDisk() { return disk_.get(); }
+    InodeManager* getInodeManager() { return inodeMgr_.get(); }
+    DirectoryManager* getDirectoryManager() { return dirMgr_.get(); }
     
     // Performance measurement
     struct PerformanceStats { // Renamed to FileStats in the instruction, but keeping original name for consistency with existing code
@@ -87,8 +93,13 @@ private:
     PerformanceStats stats_;
     std::map<uint32_t, uint32_t> blockOwners_;  // blockNum -> inodeNum mapping
     
+    // Corruption tracking for power cut simulation
+    bool hasCorruption_;
+    std::vector<uint32_t> corruptedBlocks_;
+    uint32_t activeWriteInodeNum_;
+    
     // Helper functions
-    bool allocateFileBlocks(uint32_t inodeNum, Inode& inode, const std::vector<uint8_t>& data);
+    bool allocateFileBlocks(Inode& inode, uint32_t blocksNeeded, uint32_t inodeNum);
     bool readFileData(const Inode& inode, std::vector<uint8_t>& data);
     void updateStats(bool isRead, double timeMs, uint64_t bytes);
 };

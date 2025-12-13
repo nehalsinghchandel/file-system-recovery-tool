@@ -156,19 +156,27 @@ void BlockMapWidget::updateBlockStates() {
 
 BlockState BlockMapWidget::getBlockState(uint32_t blockNum) {
     if (!fileSystem_ || blockNum >= totalBlocks_) {
-        return BlockState::FREE;  // Default to FREE for invalid blocks
+        return BlockState::FREE;
     }
     
     const auto& sb = fileSystem_->getDisk()->getSuperblock();
     
-    // Superblock (block 0)
+    // Check if block is corrupted (from power cut simulation)
+    if (fileSystem_->hasCorruption()) {
+        const auto& corruptedBlocks = fileSystem_->getCorruptedBlocks();
+        if (std::find(corruptedBlocks.begin(), corruptedBlocks.end(), blockNum) != corruptedBlocks.end()) {
+            return BlockState::CORRUPTED;
+        }
+    }
+    
+    // Superblock
     if (blockNum == 0) {
         return BlockState::SUPERBLOCK;
     }
     
     // Bitmap blocks
     if (blockNum >= sb.bitmapStart && blockNum < sb.inodeTableStart) {
-        return BlockState::INODE_TABLE;  // Using INODE_TABLE color for bitmap
+        return BlockState::INODE_TABLE;  // Use same coloras inode for bitmap
     }
     
     // Inode table blocks
@@ -176,12 +184,13 @@ BlockState BlockMapWidget::getBlockState(uint32_t blockNum) {
         return BlockState::INODE_TABLE;
     }
     
-    // Data blocks - check if free or used
-    if (fileSystem_->getDisk()->isBlockFree(blockNum)) {
-        return BlockState::FREE;
+    // Data blocks
+    if (blockNum >= sb.dataBlocksStart) {
+        bool isFree = fileSystem_->getDisk()->isBlockFree(blockNum);
+        return isFree ? BlockState::FREE : BlockState::USED;
     }
     
-    return BlockState::USED;
+    return BlockState::FREE;
 }
 
 QColor BlockMapWidget::getBlockColor(BlockState state) {

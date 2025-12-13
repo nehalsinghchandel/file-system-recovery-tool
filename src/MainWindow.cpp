@@ -222,14 +222,21 @@ void MainWindow::setupUI() {
     QGroupBox* recoveryOpsGroup = new QGroupBox("Recovery & Optimization", this);
     QVBoxLayout* recoveryLayout = new QVBoxLayout(recoveryOpsGroup);
     
-    crashBtn_ = new QPushButton("Simulate Crash", this);
+    // Power Cut Simulation button (renamed from Crash)
+    crashBtn_ = new QPushButton("Simulate Power Cut", this);
     crashBtn_->setStyleSheet("background-color: #e74c3c; color: white; font-weight: bold;");
+    crashBtn_->setMinimumHeight(40);
     
+    // Recovery button
     recoveryBtn_ = new QPushButton("Run Recovery", this);
-    recoveryBtn_->setStyleSheet("background-color: #3498db; color: white; font-weight: bold;");
+    recoveryBtn_->setStyleSheet("background-color: #27ae60; color: white; font-weight: bold;");
+    recoveryBtn_->setMinimumHeight(40);
+    recoveryBtn_->setEnabled(false);  // Disabled by default
     
+    // Defrag button
     defragBtn_ = new QPushButton("Run Defragmentation", this);
-    defragBtn_->setStyleSheet("background-color: #2ecc71; color: white; font-weight: bold;");
+    defragBtn_->setStyleSheet("background-color: #3498db; color: white; font-weight: bold;");
+    defragBtn_->setMinimumHeight(40);
     
     progressBar_ = new QProgressBar(this);
     progressBar_->setVisible(false);
@@ -527,6 +534,86 @@ void MainWindow::connectSignals() {
     connect(recoveryBtn_, &QPushButton::clicked, this, [this]() {
         controlPanel_->runRecovery();
         updateAllWidgets();
+    });
+    
+    // Power Cut Simulation Button Handler
+    connect(crashBtn_, &QPushButton::clicked, this, [this]() {
+        if (!fileSystem_ || !fileSystem_->isMounted()) {
+            logOutput_->append("[ERROR] No disk mounted");
+            return;
+        }
+        
+        logOutput_->append("====================================");
+        logOutput_->append("[⚡ POWER CUT] Simulating power failure during write...");
+        
+        // Simulate power cut
+        fileSystem_->simulatePowerCut();
+        
+        // Log corrupted blocks
+        const auto& corruptedBlocks = fileSystem_->getCorruptedBlocks();
+        logOutput_->append(QString("[CORRUPTION] Found %1 orphaned/corrupted blocks:")
+                          .arg(corruptedBlocks.size()));
+        for (uint32_t blockNum : corruptedBlocks) {
+            logOutput_->append(QString("  • Block %1 (BLACK on bitmap)").arg(blockNum));
+        }
+        
+        // Disable write operations
+        writeRandomBtn_->setEnabled(false);
+        createFileBtn_->setEnabled(false);
+        defragBtn_->setEnabled(false);
+        crashBtn_->setEnabled(false);
+        
+        // Enable ONLY recovery
+        recoveryBtn_->setEnabled(true);
+        
+        // Refresh UI to show corrupted blocks
+        blockMapWidget_->refresh();
+        fileBrowserWidget_->refresh();
+        
+        logOutput_->append("[⚠️ SYSTEM CORRUPTED] File operations DISABLED");
+        logOutput_->append("[💡 ACTION REQUIRED] Click 'Run Recovery' to fix corruption");
+        logOutput_->append("====================================");
+    });    
+    
+    // Recovery Button Handler
+    connect(recoveryBtn_, &QPushButton::clicked, this, [this]() {
+        if (!fileSystem_ || !fileSystem_->isMounted()) {
+            logOutput_->append("[ERROR] No disk mounted");
+            return;
+        }
+        
+        if (!fileSystem_->hasCorruption()) {
+            logOutput_->append("[INFO] No corruption detected");
+            return;
+        }
+        
+        logOutput_->append("====================================");
+        logOutput_->append("[🔧 RECOVERY] Starting file system recovery...");
+        
+        // Run recovery
+        bool success = fileSystem_->runRecovery();
+        
+        if (success) {
+            logOutput_->append("[✅ SUCCESS] Recovery complete!");
+            logOutput_->append("[INFO] Corrupted blocks have been freed");
+            logOutput_->append("[INFO] File system is now consistent");
+            
+            // Re-enable operations
+            writeRandomBtn_->setEnabled(true);
+            createFileBtn_->setEnabled(true);
+            defragBtn_->setEnabled(true);
+            crashBtn_->setEnabled(true);
+            recoveryBtn_->setEnabled(false);
+            
+            // Refresh UI
+            blockMapWidget_->refresh();
+            fileBrowserWidget_->refresh();
+            performanceWidget_->updateMetrics();
+        } else {
+            logOutput_->append("[ERROR] Recovery failed");
+        }
+        
+        logOutput_->append("====================================");
     });
     
     connect(defragBtn_, &QPushButton::clicked, this, [this]() {

@@ -2,8 +2,11 @@
 #include "FileSystem.h"
 #include "DefragManager.h"
 #include <QVBoxLayout>
+#include <QFormLayout>
 #include <QGroupBox>
+#include <QLabel>
 #include <QDateTime>
+#include <cstring>
 
 namespace FileSystemTool {
 
@@ -41,15 +44,22 @@ void PerformanceWidget::setupUI() {
     // Latency chart
     setupLatencyChart();
     
-    // Defrag comparison group
+    // Defragmentation Results Section
     QGroupBox* defragGroup = new QGroupBox("Defragmentation Results", this);
-    QVBoxLayout* defragLayout = new QVBoxLayout(defragGroup);
+    QFormLayout* defragLayout = new QFormLayout(defragGroup);
     
-    beforeDefragLabel_ = new QLabel("Before: N/A", this);
-    afterDefragLabel_ = new QLabel("After: N/A", this);
+    defragResultsLabel_ = new QLabel("No defrag run yet", this);
+    defragResultsLabel_->setStyleSheet("font-weight: bold; color: #95a5a6;");
     
-    defragLayout->addWidget(beforeDefragLabel_);
-    defragLayout->addWidget(afterDefragLabel_);
+    beforeLatencyLabel_ = new QLabel("N/A", this);
+    afterLatencyLabel_ = new QLabel("N/A", this);
+    improvementLabel_ = new QLabel("N/A", this);
+    improvementLabel_->setStyleSheet("font-weight: bold;");
+    
+    defragLayout->addRow("Status:", defragResultsLabel_);
+    defragLayout->addRow("Before (avg ms):", beforeLatencyLabel_);
+    defragLayout->addRow("After (avg ms):", afterLatencyLabel_);
+    defragLayout->addRow("Improvement:", improvementLabel_);
     
     mainLayout->addWidget(metricsGroup);
     mainLayout->addWidget(latencyChartView_);
@@ -163,27 +173,34 @@ void PerformanceWidget::updateFragmentationStats() {
                                 .arg(stats.totalFiles));
 }
 
-void PerformanceWidget::showDefragComparison() {
-    if (!defragMgr_) return;
-    
-    const auto& before = defragMgr_->getBeforeDefragBenchmark();
-    const auto& after = defragMgr_->getAfterDefragBenchmark();
-    
-    beforeDefragLabel_->setText(QString("Before: %1 ms avg read")
-                               .arg(before.avgReadTimeMs, 0, 'f', 2));
-    afterDefragLabel_->setText(QString("After: %1 ms avg read (%2% improvement)")
-                              .arg(after.avgReadTimeMs, 0, 'f', 2)
-                              .arg(((before.avgReadTimeMs - after.avgReadTimeMs) / 
-                                    before.avgReadTimeMs) * 100, 0, 'f', 1));
-}
-
 void PerformanceWidget::reset() {
     readLatencies_.clear();
     writeLatencies_.clear();
     timestamps_.clear();
     readLatencySeries_->clear();
-    writeLatencySeries_->clear();
-    updateMetrics();
+    throughputChart_->update();
+    latencyChartView_->update();
+}
+
+void PerformanceWidget::setDefragResults(double beforeMs, double afterMs, uint32_t filesDefragged) {
+    defragResultsLabel_->setText("Last run: Complete");
+    defragResultsLabel_->setStyleSheet("font-weight: bold; color: #27ae60;");
+    
+    beforeLatencyLabel_->setText(QString("%1 ms").arg(beforeMs, 0, 'f', 4));
+    afterLatencyLabel_->setText(QString("%1 ms").arg(afterMs, 0, 'f', 4));
+    
+    double improvement = beforeMs - afterMs;
+    QString improvementText = QString("%1 ms (%2 files)")
+                             .arg(improvement, 0, 'f', 4)
+                             .arg(filesDefragged);
+    
+    if (improvement > 0) {
+        improvementLabel_->setText("✓ " + improvementText);
+        improvementLabel_->setStyleSheet("font-weight: bold; color: #27ae60;");
+    } else {
+        improvementLabel_->setText(improvementText);
+        improvementLabel_->setStyleSheet("font-weight: bold; color: #95a5a6;");
+    }
 }
 
 } // namespace FileSystemTool

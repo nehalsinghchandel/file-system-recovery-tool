@@ -30,6 +30,7 @@ public:
     void recordWriteOperation(double latencyMs);
     void updateFragmentationStats();
     void showDefragComparison();
+    void setDefragResults(double beforeMs, double afterMs, uint32_t filesDefragged);
     void reset();
 
 private:
@@ -49,14 +50,19 @@ private:
     
     QChartView* throughputChartView_;
     QChart* throughputChart_;
-    
     // Labels
     QLabel* avgReadLabel_;
     QLabel* avgWriteLabel_;
     QLabel* totalOpsLabel_;
     QLabel* fragmentationLabel_;
-    QLabel* beforeDefragLabel_;
-    QLabel* afterDefragLabel_;
+    QLabel* latencyLabel_;
+    QLabel* throughputLabel_;
+    
+    // Defragmentation Results
+    QLabel* defragResultsLabel_;
+    QLabel* beforeLatencyLabel_;
+    QLabel* afterLatencyLabel_;
+    QLabel* improvementLabel_;
     
     // Data storage (keep last N data points)
     std::deque<double> readLatencies_;
