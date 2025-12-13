@@ -272,16 +272,12 @@ void PerformanceWidget::setupHealthChart() {
     
     healthSeries_ = new QStackedBarSeries();
     
-    QBarSet* freeSet = new QBarSet("Free Space (compressed)");
-    freeSet->setColor(QColor(46, 204, 113));  // Green
-    
     QBarSet* validSet = new QBarSet("Valid Data");
     validSet->setColor(QColor(52, 152, 219));  // Blue
     
     QBarSet* corruptedSet = new QBarSet("Corrupted Blocks");
     corruptedSet->setColor(QColor(231, 76, 60));  // Red
     
-    healthSeries_->append(freeSet);
     healthSeries_->append(validSet);
     healthSeries_->append(corruptedSet);
     
@@ -387,64 +383,53 @@ void PerformanceWidget::updatePerformanceChart(const std::vector<FilePerformance
 
 void PerformanceWidget::updateHealthChart(int freeBlocks, int validBlocks, int orphanedBlocks) {
     // The health chart shows three states: Normal, After Crash, After Recovery
-    // We need to determine which state we're updating based on orphanedBlocks
+    // Only showing Valid Data and Corrupted Blocks (no free space)
     
-    if (healthSeries_->count() < 3) return;
+    if (healthSeries_->count() < 2) return;
     
-    // Get the three bar sets
-    QBarSet* freeSet = healthSeries_->barSets().at(0);
-    QBarSet* validSet = healthSeries_->barSets().at(1);
-    QBarSet* corruptedSet = healthSeries_->barSets().at(2);
-    
-    // Compress free blocks to 20% of actual value (divide by 5)
-    // This makes the chart focus on valid data and corrupted blocks
-    int compressedFreeBlocks = freeBlocks / 5;
+    // Get the two bar sets (no free blocks anymore)
+    QBarSet* validSet = healthSeries_->barSets().at(0);
+    QBarSet* corruptedSet = healthSeries_->barSets().at(1);
     
     if (orphanedBlocks > 0) {
         // CRASH STATE: Update the middle column (After Crash)
         // Make sure we have at least 2 data points
-        while (freeSet->count() < 2) {
-            freeSet->append(0);
+        while (validSet->count() < 2) {
             validSet->append(0);
             corruptedSet->append(0);
         }
         
         // Update column 1 (After Crash)
-        freeSet->replace(1, compressedFreeBlocks);
         validSet->replace(1, validBlocks);
         corruptedSet->replace(1, orphanedBlocks);
         
-    } else if (freeSet->count() >= 2) {
+    } else if (validSet->count() >= 2) {
         // RECOVERY STATE: Update the third column (After Recovery)
         // Make sure we have 3 data points
-        while (freeSet->count() < 3) {
-            freeSet->append(0);
+        while (validSet->count() < 3) {
             validSet->append(0);
             corruptedSet->append(0);
         }
         
         // Update column 2 (After Recovery)
-        freeSet->replace(2, compressedFreeBlocks);
         validSet->replace(2, validBlocks);
         corruptedSet->replace(2, 0);  // No corrupted blocks after recovery
         
     } else {
         // NORMAL STATE: Initialize the first column
         // Clear any existing data
-        freeSet->remove(0, freeSet->count());
         validSet->remove(0, validSet->count());
         corruptedSet->remove(0, corruptedSet->count());
         
         // Add column 0 (Normal)
-        freeSet->append(compressedFreeBlocks);
         validSet->append(validBlocks);
         corruptedSet->append(0);  // No corrupted blocks in normal state
     }
     
-    // Update Y-axis range to fit the data (accounting for compressed free blocks)
-    int maxValue = std::max({compressedFreeBlocks, validBlocks, orphanedBlocks, 100});
+    // Update Y-axis range to fit the data
+    int maxValue = std::max({validBlocks, orphanedBlocks, 50});
     if (!healthChart_->axes(Qt::Vertical).isEmpty()) {
-        healthChart_->axes(Qt::Vertical).first()->setRange(0, maxValue * 1.2);
+        healthChart_->axes(Qt::Vertical).first()->setRange(0, maxValue * 1.3);
     }
     
     healthChart_->update();
