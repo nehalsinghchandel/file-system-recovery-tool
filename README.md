@@ -521,7 +521,7 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 For questions, issues, or suggestions:
 - **Open an Issue:** GitHub Issues tab
-- **Email:** nehalsinghchandel@example.com
+- **Email:** nehalsinghchandel@gmail.com
 
 ---
 
